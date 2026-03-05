@@ -1,0 +1,17 @@
+slack:
+  appToken: xapp-1-...    # Socket Mode token (starts with xapp-)
+  botToken: xoxb-...      # Bot OAuth token (starts with xoxb-)
+  channel: C0123ORBIT     # Default channel for reports
+
+claude:
+  sessionDirs:
+    - /root/.claude/projects/
+
+git:
+  repos:
+    - /root/orbit
+    - /root/my-project
+
+scheduler:
+  enabled: false
+  intervalMinutes: 30

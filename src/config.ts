@@ -19,6 +19,14 @@ export interface Config {
     enabled: boolean;
     intervalMinutes: number;
   };
+  anthropic?: {
+    apiKey?: string;
+  };
+  actions?: {
+    confirmDangerous?: boolean;
+    captureDelayMs?: number;
+    allowedCommands?: string[];
+  };
 }
 
 const DEFAULT_CONFIG_PATH = resolve(homedir(), ".orbit", "config.yaml");
@@ -59,6 +67,18 @@ export function loadConfig(configPath?: string): Config {
     scheduler: {
       enabled: parsed.scheduler?.enabled ?? false,
       intervalMinutes: parsed.scheduler?.intervalMinutes ?? 30,
+    },
+    anthropic: parsed.anthropic
+      ? { apiKey: parsed.anthropic.apiKey }
+      : undefined,
+    actions: {
+      confirmDangerous: parsed.actions?.confirmDangerous ?? true,
+      captureDelayMs: parsed.actions?.captureDelayMs ?? 3000,
+      allowedCommands: parsed.actions?.allowedCommands ?? [
+        "y",
+        "yes",
+        "no",
+      ],
     },
   };
 }

@@ -1,5 +1,5 @@
-import type { KnownBlock } from "@slack/types";
 import type { Config } from "../config.js";
+import type { Message, CommandResult } from "../messages.js";
 import { getSystemStatus } from "../monitors/system.js";
 import { getClaudeSessions, getClaudeSession } from "../monitors/claude.js";
 import { getGitStatus, getGitRepoStatus } from "../monitors/git.js";
@@ -15,7 +15,8 @@ import {
   formatTmuxCapture,
   formatConfirmSend,
   formatAuditLog,
-} from "../slack/formatters.js";
+  parseMarkdownMessage,
+} from "../formatters.js";
 import { startScheduler, stopScheduler } from "../scheduler.js";
 import { summarizeSessions, summarizeSession } from "../summarizer.js";
 import { getRecentSnapshots, getHistory, getLatestSnapshot } from "../history.js";
@@ -26,12 +27,12 @@ import {
   sendToTmux,
 } from "../actions/tmux.js";
 import { appendAudit, getRecentAudit } from "../actions/audit.js";
+import { startActiveWatch } from "../monitors/watcher.js";
 import Anthropic from "@anthropic-ai/sdk";
 
-export interface CommandResult {
-  blocks: KnownBlock[];
-  text: string;
-}
+let nlClient: Anthropic | null = null;
+
+export { CommandResult };
 
 export interface PendingAction {
   session: string;
@@ -41,9 +42,9 @@ export interface PendingAction {
   createdAt: number;
 }
 
-type PostMessage = (channel: string, blocks: KnownBlock[], text: string) => Promise<void>;
+type PostMessage = (channel: string, message: Message, threadId?: string) => Promise<string | undefined>;
 
-// In-memory store for pending confirmations; exported so bot.ts action handlers can access it
+// In-memory store for pending confirmations; exported so adapter confirm handlers can access it
 export const pendingActions = new Map<string, PendingAction>();
 
 // Clean up expired pending actions (60s TTL)
@@ -147,8 +148,11 @@ export async function waitForStableOutput(
   }
 }
 
+function textMessage(t: string): Message {
+  return { parts: [{ kind: "text", text: t }] };
+}
+
 export function createRouter(config: Config, postMessage: PostMessage) {
-  // Current focused session — used by the NL handler to resolve ambiguous commands
   let focusedSession: { tmuxSession: string; agentId: string | null } | null = null;
 
   async function handleCommand(
@@ -160,11 +164,17 @@ export function createRouter(config: Config, postMessage: PostMessage) {
     const command = parts[0]?.toLowerCase();
     const arg = parts.slice(1).join(" ");
 
+    // Focus/unfocus/help always work regardless of focus mode
+    if (command === "focus") return handleFocus(arg);
+    if (command === "unfocus") return handleUnfocus();
+    if (command === "help") return handleHelp();
+
+    // When focused, send everything else directly to the focused session
+    if (focusedSession) {
+      return executeSend(focusedSession.tmuxSession, text, "focus_send", channel, userId);
+    }
+
     switch (command) {
-      case "focus":
-        return handleFocus(arg);
-      case "unfocus":
-        return handleUnfocus();
       case "status":
         return handleStatus();
       case "agents":
@@ -188,22 +198,61 @@ export function createRouter(config: Config, postMessage: PostMessage) {
       case "send":
         return handleSend(arg, channel, userId);
       case "answer":
-        return handleAnswer(arg, userId);
+        return handleAnswer(arg, channel, userId);
       case "audit":
         return handleAudit();
-      case "help":
-        return handleHelp();
-      default:
+      default: {
+        // If exactly one agent is waiting, short input goes directly to it
+        const autoRouted = tryAutoAnswer(text, channel, userId);
+        if (autoRouted) return autoRouted;
         return handleNaturalLanguage(text, channel, userId);
+      }
     }
   }
 
   return handleCommand;
 
+  /** If exactly one agent is waiting for input and the message looks like a direct answer, send it. */
+  function tryAutoAnswer(
+    text: string,
+    channel: string,
+    userId?: string
+  ): CommandResult | null {
+    // Only for short, direct-sounding input
+    if (text.length > 200) return null;
+
+    try {
+      const sessions = getClaudeSessions(config.claude.sessionDirs);
+      const waiting = sessions.filter(
+        (s) => s.status === "waiting" && (s.waitingPrompt || s.waitingQuestion)
+      );
+      if (waiting.length !== 1) return null;
+
+      const target = waiting[0];
+
+      // Check if it matches a prompt option exactly (case-insensitive)
+      if (target.waitingPrompt) {
+        const lower = text.toLowerCase().trim();
+        const matchesOption = target.waitingPrompt.options.some(
+          (o) => o.toLowerCase() === lower
+        );
+        if (matchesOption || /^(y|n|yes|no|ok|sure|do it|approve|reject|cancel|skip|continue)$/i.test(text.trim())) {
+          return executeSend(target.tmuxSession, text.trim(), "auto_answer", channel, userId);
+        }
+      } else if (/^(y|n|yes|no|ok|sure|do it|approve|reject|cancel|skip|continue)$/i.test(text.trim())) {
+        // No structured prompt but it's a clear yes/no style response
+        return executeSend(target.tmuxSession, text.trim(), "auto_answer", channel, userId);
+      }
+    } catch {
+      // fall through
+    }
+    return null;
+  }
+
   function handleStatus(): CommandResult {
     const status = getSystemStatus();
     return {
-      blocks: formatSystemStatus(status),
+      message: formatSystemStatus(status),
       text: `System status for ${status.hostname}`,
     };
   }
@@ -212,7 +261,7 @@ export function createRouter(config: Config, postMessage: PostMessage) {
     const sessions = getClaudeSessions(config.claude.sessionDirs);
     const snapshots = await summarizeSessions(sessions, config.claude.sessionDirs);
     return {
-      blocks: formatAgentList(sessions, snapshots),
+      message: formatAgentList(sessions, snapshots),
       text: `Found ${sessions.length} active Claude sessions`,
     };
   }
@@ -220,14 +269,14 @@ export function createRouter(config: Config, postMessage: PostMessage) {
   async function handleAgent(id: string): Promise<CommandResult> {
     if (!id) {
       return {
-        blocks: [{ type: "section", text: { type: "mrkdwn", text: "Usage: `orbit agent <id>`" } }],
+        message: textMessage("Usage: `orbit agent <id>`"),
         text: "Missing agent ID",
       };
     }
     const session = getClaudeSession(config.claude.sessionDirs, id);
     if (!session) {
       return {
-        blocks: [{ type: "section", text: { type: "mrkdwn", text: `No session found with ID \`${id}\`` } }],
+        message: textMessage(`No session found with ID \`${id}\``),
         text: "Session not found",
       };
     }
@@ -245,7 +294,7 @@ export function createRouter(config: Config, postMessage: PostMessage) {
     const recentHistory = getRecentSnapshots(session.id, 5);
 
     return {
-      blocks: formatAgentDetail(session, snapshot, recentHistory),
+      message: formatAgentDetail(session, snapshot, recentHistory),
       text: `Agent ${session.id} detail`,
     };
   }
@@ -253,7 +302,7 @@ export function createRouter(config: Config, postMessage: PostMessage) {
   async function handleGit(): Promise<CommandResult> {
     const repos = await getGitStatus(config.git.repos);
     return {
-      blocks: formatGitSummary(repos),
+      message: formatGitSummary(repos),
       text: `Git status for ${repos.length} repos`,
     };
   }
@@ -262,12 +311,12 @@ export function createRouter(config: Config, postMessage: PostMessage) {
     const repo = await getGitRepoStatus(config.git.repos, name);
     if (!repo) {
       return {
-        blocks: [{ type: "section", text: { type: "mrkdwn", text: `No repo found matching \`${name}\`` } }],
+        message: textMessage(`No repo found matching \`${name}\``),
         text: "Repo not found",
       };
     }
     return {
-      blocks: formatGitDetail(repo),
+      message: formatGitDetail(repo),
       text: `Git detail for ${repo.name}`,
     };
   }
@@ -277,7 +326,7 @@ export function createRouter(config: Config, postMessage: PostMessage) {
     const sessions = getClaudeSessions(config.claude.sessionDirs);
     const repos = await getGitStatus(config.git.repos);
     return {
-      blocks: formatFullReport(system, sessions, repos),
+      message: formatFullReport(system, sessions, repos),
       text: "Full orbit report",
     };
   }
@@ -290,7 +339,7 @@ export function createRouter(config: Config, postMessage: PostMessage) {
     const minutes = parseInt(arg, 10);
     if (isNaN(minutes) || minutes < 1) {
       return {
-        blocks: [{ type: "section", text: { type: "mrkdwn", text: "Usage: `orbit watch <minutes>`" } }],
+        message: textMessage("Usage: `orbit watch <minutes>`"),
         text: "Invalid interval",
       };
     }
@@ -298,7 +347,7 @@ export function createRouter(config: Config, postMessage: PostMessage) {
     startScheduler(minutes, channel, config, post);
 
     return {
-      blocks: [{ type: "section", text: { type: "mrkdwn", text: `Started periodic reports every ${minutes} minute(s). Use \`orbit stop\` to cancel.` } }],
+      message: textMessage(`Started periodic reports every ${minutes} minute(s). Use \`orbit stop\` to cancel.`),
       text: `Watching every ${minutes} minutes`,
     };
   }
@@ -306,7 +355,7 @@ export function createRouter(config: Config, postMessage: PostMessage) {
   function handleStop(): CommandResult {
     stopScheduler();
     return {
-      blocks: [{ type: "section", text: { type: "mrkdwn", text: "Periodic reporting stopped." } }],
+      message: textMessage("Periodic reporting stopped."),
       text: "Stopped watching",
     };
   }
@@ -316,7 +365,7 @@ export function createRouter(config: Config, postMessage: PostMessage) {
       // Show history for a specific session ID
       const snapshots = getRecentSnapshots(arg, 15);
       return {
-        blocks: formatHistory(snapshots),
+        message: formatHistory(snapshots),
         text: `History for session ${arg}`,
       };
     }
@@ -324,7 +373,7 @@ export function createRouter(config: Config, postMessage: PostMessage) {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const snapshots = getHistory(since);
     return {
-      blocks: formatHistory(snapshots),
+      message: formatHistory(snapshots),
       text: "Recent history (last 24h)",
     };
   }
@@ -332,7 +381,7 @@ export function createRouter(config: Config, postMessage: PostMessage) {
   function handleSessions(): CommandResult {
     const sessions = listTmuxSessions();
     return {
-      blocks: formatTmuxSessionList(sessions),
+      message: formatTmuxSessionList(sessions),
       text: `Found ${sessions.length} tmux session(s)`,
     };
   }
@@ -340,7 +389,7 @@ export function createRouter(config: Config, postMessage: PostMessage) {
   function handleCapture(arg: string): CommandResult {
     if (!arg) {
       return {
-        blocks: [{ type: "section", text: { type: "mrkdwn", text: "Usage: `orbit capture <session>`" } }],
+        message: textMessage("Usage: `orbit capture <session>`"),
         text: "Missing session name",
       };
     }
@@ -355,12 +404,12 @@ export function createRouter(config: Config, postMessage: PostMessage) {
         detail: content.slice(0, 100),
       });
       return {
-        blocks: formatTmuxCapture(arg, content),
+        message: formatTmuxCapture(arg, content),
         text: `Captured pane from ${arg}`,
       };
     } catch (err) {
       return {
-        blocks: [{ type: "section", text: { type: "mrkdwn", text: `Error: ${err instanceof Error ? err.message : "Unknown error"}` } }],
+        message: textMessage(`Error: ${err instanceof Error ? err.message : "Unknown error"}`),
         text: "Capture failed",
       };
     }
@@ -375,7 +424,7 @@ export function createRouter(config: Config, postMessage: PostMessage) {
     const spaceIdx = arg.indexOf(" ");
     if (!arg || spaceIdx === -1) {
       return {
-        blocks: [{ type: "section", text: { type: "mrkdwn", text: "Usage: `orbit send <session> <text>`" } }],
+        message: textMessage("Usage: `orbit send <session> <text>`"),
         text: "Missing arguments",
       };
     }
@@ -398,23 +447,24 @@ export function createRouter(config: Config, postMessage: PostMessage) {
         createdAt: Date.now(),
       });
       return {
-        blocks: formatConfirmSend(sessionName, sendText, actionId),
+        message: formatConfirmSend(sessionName, sendText, actionId),
         text: `Confirm send to ${sessionName}`,
       };
     }
 
-    return executeSend(sessionName, sendText, "send", userId);
+    return executeSend(sessionName, sendText, "send", channel, userId);
   }
 
   async function handleAnswer(
     arg: string,
+    channel: string,
     userId?: string
   ): Promise<CommandResult> {
     // Parse: first word is agent ID, rest is text
     const spaceIdx = arg.indexOf(" ");
     if (!arg || spaceIdx === -1) {
       return {
-        blocks: [{ type: "section", text: { type: "mrkdwn", text: "Usage: `orbit answer <agent-id> <text>`" } }],
+        message: textMessage("Usage: `orbit answer <agent-id> <text>`"),
         text: "Missing arguments",
       };
     }
@@ -426,18 +476,19 @@ export function createRouter(config: Config, postMessage: PostMessage) {
     const session = getClaudeSession(config.claude.sessionDirs, agentId);
     if (!session) {
       return {
-        blocks: [{ type: "section", text: { type: "mrkdwn", text: `No active agent found with ID \`${agentId}\`` } }],
+        message: textMessage(`No active agent found with ID \`${agentId}\``),
         text: "Agent not found",
       };
     }
 
-    return executeSend(session.tmuxSession, answerText, "answer", userId);
+    return executeSend(session.tmuxSession, answerText, "answer", channel, userId);
   }
 
   async function executeSend(
     sessionName: string,
     text: string,
     action: string,
+    channel: string,
     userId?: string
   ): Promise<CommandResult> {
     try {
@@ -462,16 +513,19 @@ export function createRouter(config: Config, postMessage: PostMessage) {
         input: text,
         result: "success",
         detail: captured.slice(0, 100),
-        slackUser: userId,
+        userId,
       });
 
-      const blocks: KnownBlock[] = [
-        { type: "section", text: { type: "mrkdwn", text: `Sent to \`${sessionName}\`: \`${text}\`` } },
+      // Start active watch to track the agent's response
+      startActiveWatch(sessionName, channel, text);
+
+      const msgParts: import("../messages.js").MessagePart[] = [
+        { kind: "text", text: `Sent to \`${sessionName}\`: \`${text}\`` },
       ];
       if (captured) {
-        blocks.push(...formatTmuxCapture(sessionName, captured));
+        msgParts.push(...formatTmuxCapture(sessionName, captured).parts);
       }
-      return { blocks, text: `Sent "${text}" to ${sessionName}` };
+      return { message: { parts: msgParts }, text: `Sent "${text}" to ${sessionName}` };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : "Unknown error";
       appendAudit({
@@ -481,10 +535,10 @@ export function createRouter(config: Config, postMessage: PostMessage) {
         input: text,
         result: "error",
         detail: errMsg,
-        slackUser: userId,
+        userId,
       });
       return {
-        blocks: [{ type: "section", text: { type: "mrkdwn", text: `Error: ${errMsg}` } }],
+        message: textMessage(`Error: ${errMsg}`),
         text: "Send failed",
       };
     }
@@ -493,7 +547,7 @@ export function createRouter(config: Config, postMessage: PostMessage) {
   function handleAudit(): CommandResult {
     const entries = getRecentAudit(15);
     return {
-      blocks: formatAuditLog(entries),
+      message: formatAuditLog(entries),
       text: `${entries.length} recent audit entries`,
     };
   }
@@ -503,12 +557,12 @@ export function createRouter(config: Config, postMessage: PostMessage) {
       if (focusedSession) {
         const agentStr = focusedSession.agentId ? ` (agent \`${focusedSession.agentId}\`)` : "";
         return {
-          blocks: [{ type: "section", text: { type: "mrkdwn", text: `Currently focused on \`${focusedSession.tmuxSession}\`${agentStr}` } }],
+          message: textMessage(`Currently focused on \`${focusedSession.tmuxSession}\`${agentStr}`),
           text: `Focused on ${focusedSession.tmuxSession}`,
         };
       }
       return {
-        blocks: [{ type: "section", text: { type: "mrkdwn", text: "No session focused. Use `focus <session>` to set one." } }],
+        message: textMessage("No session focused. Use `focus <session>` to set one."),
         text: "No focus set",
       };
     }
@@ -529,7 +583,7 @@ export function createRouter(config: Config, postMessage: PostMessage) {
 
     const agentStr = focusedSession.agentId ? ` (agent \`${focusedSession.agentId}\`)` : "";
     return {
-      blocks: [{ type: "section", text: { type: "mrkdwn", text: `Focused on \`${focusedSession.tmuxSession}\`${agentStr}. Commands like "say yes" will target this session.` } }],
+      message: textMessage(`Focused on \`${focusedSession.tmuxSession}\`${agentStr}. All unrecognized input will be sent to this session.`),
       text: `Focused on ${focusedSession.tmuxSession}`,
     };
   }
@@ -537,7 +591,7 @@ export function createRouter(config: Config, postMessage: PostMessage) {
   function handleUnfocus(): CommandResult {
     focusedSession = null;
     return {
-      blocks: [{ type: "section", text: { type: "mrkdwn", text: "Focus cleared." } }],
+      message: textMessage("Focus cleared."),
       text: "Focus cleared",
     };
   }
@@ -598,25 +652,24 @@ export function createRouter(config: Config, postMessage: PostMessage) {
     }
 
     const context = buildSystemContext();
-    const focusContext = focusedSession
-      ? `\nCURRENT FOCUS: The user is focused on tmux session "${focusedSession.tmuxSession}"${focusedSession.agentId ? ` (agent ID: ${focusedSession.agentId})` : ""}. When the user says "say X", "tell it X", "yes", "no", or any short message that looks like input for an agent, route it to this session. Use "answer ${focusedSession.agentId} <text>" if there's an agent ID, or "send ${focusedSession.tmuxSession} <text>" otherwise.`
-      : "\nNo session is currently focused. If the user says something like 'focus on X' or 'switch to X', respond with: focus <session-name>";
 
     try {
-      const client = new Anthropic({ apiKey });
+      if (!nlClient) nlClient = new Anthropic({ apiKey });
+      const client = nlClient;
       const response = await client.messages.create({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 300,
+        max_tokens: 600,
         system: `You are Orbit, a server monitoring and control bot. You run on a remote machine and talk to the user via Slack.
 
 Current system state:
 ${context}
-${focusContext}
 
 You can either route to a command or answer directly.
 
 DIRECT ANSWER — respond with: chat <your response>
-Prefer this whenever you can answer from the system state above. Be concise and informative. Use Slack mrkdwn formatting. This includes questions about what agents are doing, session status, system health, what needs attention, etc. The system state above already has agent summaries and status — use them.
+Prefer this whenever you can answer from the system state above. Be concise and informative. Use markdown formatting. This includes questions about what agents are doing, session status, system health, what needs attention, etc. The system state above already has agent summaries and status — use them.
+
+When summarizing substantial agent work (file changes, key decisions, progress), use markdown headers (## Key Insights, ## Changes, etc.) to organize the response. Use fenced code blocks (\`\`\`) for file listings, command output, or any structured data. Keep prose paragraphs short — use bullet points.
 
 ROUTING — respond with just the command (no "orbit" prefix):
 Only route when the user explicitly wants detailed/formatted output that goes beyond what's in the context, or wants to perform an action.
@@ -657,8 +710,8 @@ IMPORTANT: "what's going on in X?" or "what's X doing?" should be answered direc
       if (commandText.startsWith("chat ")) {
         const reply = commandText.slice(5);
         return {
-          blocks: [{ type: "section", text: { type: "mrkdwn", text: reply } }],
-          text: reply,
+          message: parseMarkdownMessage(reply),
+          text: reply.slice(0, 200),
         };
       }
 
@@ -672,9 +725,9 @@ IMPORTANT: "what's going on in X?" or "what's X doing?" should be answered direc
 
   function handleHelp(): CommandResult {
     const helpText = [
-      "*Orbit Commands:*",
+      "**Orbit Commands:**",
       "",
-      "*Monitoring:*",
+      "**Monitoring:**",
       "`orbit status` — System health (CPU, memory, disk, uptime)",
       "`orbit agents` — List active Claude Code sessions",
       "`orbit agent <id>` — Detail on a specific agent session",
@@ -686,13 +739,13 @@ IMPORTANT: "what's going on in X?" or "what's X doing?" should be answered direc
       "`orbit watch <minutes>` — Start periodic reporting",
       "`orbit stop` — Stop periodic reporting",
       "",
-      "*Actions:*",
+      "**Actions:**",
       "`orbit sessions` — List all tmux sessions",
       "`orbit capture <session>` — Show visible pane content",
       "`orbit send <session> <text>` — Send keystrokes to a tmux session",
       "`orbit answer <agent-id> <text>` — Answer a Claude agent's question",
       "`orbit audit` — Show recent action audit log",
-      "`orbit focus <session>` — Set current session (commands route here by default)",
+      "`orbit focus <session>` — Focus a session (all input sent directly to it)",
       "`orbit unfocus` — Clear focused session",
       "",
       "`orbit help` — Show this help",
@@ -701,7 +754,7 @@ IMPORTANT: "what's going on in X?" or "what's X doing?" should be answered direc
     ].join("\n");
 
     return {
-      blocks: [{ type: "section", text: { type: "mrkdwn", text: helpText } }],
+      message: textMessage(helpText),
       text: "Orbit help",
     };
   }

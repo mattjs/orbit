@@ -26,6 +26,14 @@ export interface Config {
     confirmDangerous?: boolean;
     captureDelayMs?: number;
     allowedCommands?: string[];
+    watchMessageThreshold?: number;
+    watchActiveTimeoutMs?: number;
+  };
+  web?: {
+    enabled: boolean;
+    port: number;
+    auth: { username: string; password: string };
+    tls?: { cert: string; key: string };
   };
 }
 
@@ -79,6 +87,21 @@ export function loadConfig(configPath?: string): Config {
         "yes",
         "no",
       ],
+      watchMessageThreshold: parsed.actions?.watchMessageThreshold ?? 10,
+      watchActiveTimeoutMs: parsed.actions?.watchActiveTimeoutMs ?? 60000,
     },
+    web: parsed.web?.enabled
+      ? {
+          enabled: true,
+          port: parsed.web.port ?? 3000,
+          auth: {
+            username: parsed.web.auth?.username ?? "admin",
+            password: parsed.web.auth?.password ?? "changeme",
+          },
+          tls: parsed.web.tls?.cert && parsed.web.tls?.key
+            ? { cert: parsed.web.tls.cert, key: parsed.web.tls.key }
+            : undefined,
+        }
+      : undefined,
   };
 }

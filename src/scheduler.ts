@@ -1,11 +1,11 @@
-import type { KnownBlock } from "@slack/types";
 import type { Config } from "./config.js";
+import type { Message } from "./messages.js";
 import { getSystemStatus } from "./monitors/system.js";
 import { getClaudeSessions } from "./monitors/claude.js";
 import { getGitStatus } from "./monitors/git.js";
-import { formatFullReport } from "./slack/formatters.js";
+import { formatFullReport } from "./formatters.js";
 
-type PostMessage = (channel: string, blocks: KnownBlock[], text: string) => Promise<void>;
+type PostMessage = (channel: string, message: Message, threadId?: string) => Promise<string | undefined>;
 
 let schedulerInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -22,8 +22,8 @@ export function startScheduler(
       const system = getSystemStatus();
       const sessions = getClaudeSessions(config.claude.sessionDirs);
       const repos = await getGitStatus(config.git.repos);
-      const blocks = formatFullReport(system, sessions, repos);
-      await postMessage(channel, blocks, "Orbit periodic report");
+      const message = formatFullReport(system, sessions, repos);
+      await postMessage(channel, message, undefined);
     } catch (err) {
       console.error("Scheduler report failed:", err);
     }

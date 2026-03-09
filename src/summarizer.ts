@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { statSync } from "fs";
-import type { ClaudeSession, SessionStatus } from "./monitors/claude.js";
+import type { ClaudeSession, SessionStatus, WaitingPrompt } from "./monitors/claude.js";
 import { getRecentMessages, getLastAssistantText, findJsonlForSession } from "./monitors/claude.js";
 import { appendSnapshot, getLatestSnapshot } from "./history.js";
 import { loadConfig } from "./config.js";
@@ -12,14 +12,22 @@ export interface SessionSnapshot {
   summary: string;
   substantialContent?: string; // preserved full text when agent produced meaningful output
   waitingQuestion: string | null;
+  waitingPrompt: WaitingPrompt | null;
   activeToolCall: string | null;
   toolCounts: Record<string, number>;
   filesEdited: string[];
   totalOutputTokens: number;
+  tmuxSession?: string;
+  projectPath?: string;
+  jsonlPath?: string;
 }
 
 // Cache: sessionId -> last mtime we summarized
 const lastMtimeCache = new Map<string, number>();
+
+// Cache: sessionId -> timestamp of last LLM summary call
+const lastSummaryTime = new Map<string, number>();
+const SUMMARY_COOLDOWN_MS = 60_000; // don't re-summarize more than once per minute
 
 let anthropicClient: Anthropic | null = null;
 
@@ -61,13 +69,18 @@ async function generateSummary(
   try {
     const response = await client.messages.create({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 250,
-      system: `Analyze a coding agent's recent activity and respond in this exact JSON format:
-{"summary":"2-3 sentence summary covering the full arc of what the agent has done and is currently doing","substantial":true/false}
+      max_tokens: 150,
+      system: `Summarize a coding agent's current activity. Respond in JSON:
+{"summary":"...","substantial":false}
 
-${previousSummary ? "You are given a previous summary — update it with the new activity. Preserve important context from before (what was accomplished, key decisions) while adding what's new. The summary should read as a coherent narrative, not a list of diffs." : "Focus the summary on the goal and progress, not individual tool calls. Be specific about what code/feature is being worked on."}
+Summary rules:
+- ONE sentence, max 120 characters. Be terse like a commit message or status line.
+- Lead with WHAT is being done, not narrative ("Adding TLS support" not "The agent is working on adding TLS support")
+- Name the specific feature, file, or bug — no vague descriptions
+- Use present tense for in-progress work, past tense for completed work
+${previousSummary ? "- You have a previous summary. Replace it if the focus changed, or keep it if work continues on the same thing." : ""}
 
-Set "substantial" to true ONLY when the agent's last message contains meaningful long-form text output that a human would want to read in full — plans, writeups, explanations, analysis, or detailed answers. NOT for routine work like editing files, running commands, fixing bugs, or short status updates. When in doubt, false.`,
+Set "substantial" to true ONLY for meaningful long-form output (plans, writeups, analysis). NOT for edits, commands, or fixes.`,
       messages: [
         {
           role: "user",
@@ -80,7 +93,9 @@ Set "substantial" to true ONLY when the agent's last message contains meaningful
     const raw = textBlock?.text?.trim() || "";
 
     try {
-      const parsed = JSON.parse(raw);
+      // Strip markdown code fences if present (e.g. ```json ... ```)
+      const cleaned = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?\s*```$/,"");
+      const parsed = JSON.parse(cleaned);
       return {
         summary: parsed.summary || "(empty summary)",
         isSubstantial: parsed.substantial === true,
@@ -101,9 +116,9 @@ function extractActiveToolCall(session: ClaudeSession): string | null {
   return pending.map((t) => t.tool).join(", ");
 }
 
-function buildMessageExcerpt(jsonlPath: string): string {
-  const messages = getRecentMessages(jsonlPath, 20);
-  if (messages.length === 0) return "(no messages)";
+function buildMessageExcerpt(jsonlPath: string, since?: string): string {
+  const messages = getRecentMessages(jsonlPath, 20, since);
+  if (messages.length === 0) return "";
 
   const parts: string[] = [];
   for (const msg of messages) {
@@ -130,11 +145,24 @@ export async function summarizeSession(
     if (existing) return existing;
   }
 
-  // Generate incremental summary — feed previous summary for continuity
-  const excerpt = buildMessageExcerpt(jsonlPath);
+  // Even with force, respect cooldown to avoid excessive LLM calls
+  const lastCall = lastSummaryTime.get(session.id);
+  if (lastCall && Date.now() - lastCall < SUMMARY_COOLDOWN_MS) {
+    const existing = getLatestSnapshot(session.id);
+    if (existing) return existing;
+  }
+
+  // Generate incremental summary — only look at messages since last snapshot
   const previousSnapshot = getLatestSnapshot(session.id);
+  const excerpt = buildMessageExcerpt(jsonlPath, previousSnapshot?.timestamp);
+
+  // If no new messages since last snapshot, reuse it
+  if (!excerpt && previousSnapshot) {
+    return previousSnapshot;
+  }
+
   const { summary: aiSummary, isSubstantial } = await generateSummary(
-    excerpt,
+    excerpt || "(no recent activity)",
     previousSnapshot?.summary
   );
   const activeToolCall = extractActiveToolCall(session);
@@ -155,15 +183,20 @@ export async function summarizeSession(
     summary: aiSummary,
     substantialContent,
     waitingQuestion: session.waitingQuestion,
+    waitingPrompt: session.waitingPrompt,
     activeToolCall,
     toolCounts: session.summary.toolCounts,
     filesEdited: session.summary.filesEdited,
     totalOutputTokens: session.summary.totalOutputTokens,
+    tmuxSession: session.tmuxSession,
+    projectPath: session.projectPath,
+    jsonlPath: session.jsonlPath ?? jsonlPath,
   };
 
   // Persist and cache
   appendSnapshot(snapshot);
   lastMtimeCache.set(session.id, mtime);
+  lastSummaryTime.set(session.id, Date.now());
 
   return snapshot;
 }

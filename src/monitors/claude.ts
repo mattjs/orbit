@@ -4,6 +4,11 @@ import { execSync } from "child_process";
 
 export type SessionStatus = "executing" | "thinking" | "idle" | "waiting";
 
+export interface WaitingPrompt {
+  question: string;
+  options: string[];
+}
+
 export interface SessionSummary {
   timespan: string;
   toolCounts: Record<string, number>;
@@ -26,6 +31,7 @@ export interface ClaudeSession {
   recentActions: string[];
   status: SessionStatus;
   waitingQuestion: string | null;
+  waitingPrompt: WaitingPrompt | null;
   summary: SessionSummary;
   aiSummary: string | null;
   jsonlPath: string | null;
@@ -165,7 +171,7 @@ function getMessageParts(msg: JsonlMessage): {
 
 function deriveStatus(
   tail: JsonlMessage[]
-): { status: SessionStatus; waitingQuestion: string | null } {
+): { status: SessionStatus; waitingQuestion: string | null; waitingPrompt: WaitingPrompt | null } {
   // Walk backwards to find the last assistant message
   for (let i = tail.length - 1; i >= 0; i--) {
     const entry = tail[i];
@@ -184,21 +190,31 @@ function deriveStatus(
     const askQuestion = toolUses.find((t) => t.name === "AskUserQuestion");
     if (askQuestion) {
       let questionText = "";
+      const questionParts: string[] = [];
+      const allOptions: string[] = [];
       const input = askQuestion.input;
       if (input && Array.isArray(input.questions)) {
         const parts: string[] = [];
         for (const q of input.questions as Array<Record<string, unknown>>) {
-          if (q.question) parts.push(String(q.question));
+          if (q.question) {
+            parts.push(String(q.question));
+            questionParts.push(String(q.question));
+          }
           if (Array.isArray(q.options)) {
             const labels = (q.options as Array<Record<string, unknown>>)
               .map((o) => String(o.label || o))
               .filter(Boolean);
+            allOptions.push(...labels);
             if (labels.length > 0) parts.push(`Options: ${labels.join(" | ")}`);
           }
         }
         questionText = parts.join("\n");
       }
-      return { status: "waiting", waitingQuestion: questionText || null };
+      const promptQuestion = questionParts.join("\n") || questionText;
+      const prompt: WaitingPrompt | null = promptQuestion
+        ? { question: promptQuestion, options: allOptions }
+        : null;
+      return { status: "waiting", waitingQuestion: questionText || null, waitingPrompt: prompt };
     }
 
     // Check for tool_use with no corresponding tool_result → executing
@@ -214,16 +230,16 @@ function deriveStatus(
           }
         }
       }
-      if (!hasResult) return { status: "executing", waitingQuestion: null };
+      if (!hasResult) return { status: "executing", waitingQuestion: null, waitingPrompt: null };
     }
 
     // Thinking blocks without tool_use → thinking
     if (hasThinking && toolUses.length === 0 && !stopReason) {
-      return { status: "thinking", waitingQuestion: null };
+      return { status: "thinking", waitingQuestion: null, waitingPrompt: null };
     }
 
     // stop_reason is end_turn or has stop → idle
-    return { status: "idle", waitingQuestion: null };
+    return { status: "idle", waitingQuestion: null, waitingPrompt: null };
   }
 
   return { status: "idle", waitingQuestion: null };
@@ -379,7 +395,7 @@ function parseJsonlFile(filePath: string, agent: LiveAgent): ClaudeSession | nul
     }
 
     // Derive status and summary
-    const { status, waitingQuestion } = deriveStatus(tail);
+    const { status, waitingQuestion, waitingPrompt } = deriveStatus(tail);
     const summary = buildSummary(messages);
 
     return {
@@ -396,6 +412,7 @@ function parseJsonlFile(filePath: string, agent: LiveAgent): ClaudeSession | nul
       recentActions: [...new Set(recentActions)].slice(-10),
       status,
       waitingQuestion,
+      waitingPrompt,
       summary,
       aiSummary: null,
       jsonlPath: filePath,
@@ -403,6 +420,48 @@ function parseJsonlFile(filePath: string, agent: LiveAgent): ClaudeSession | nul
   } catch {
     return null;
   }
+}
+
+export interface ProjectSession {
+  sessionId: string;
+  jsonlPath: string;
+  fileName: string;
+  mtime: string;
+  sizeBytes: number;
+}
+
+export function listProjectSessions(sessionDirs: string[], projectCwd: string): ProjectSession[] {
+  const encoded = projectCwd.replace(/\//g, "-");
+  const sessions: ProjectSession[] = [];
+
+  for (const dir of sessionDirs) {
+    const projectDir = resolve(dir, encoded);
+    if (!existsSync(projectDir)) continue;
+
+    try {
+      const files = readdirSync(projectDir).filter((f) => f.endsWith(".jsonl"));
+      for (const f of files) {
+        const fullPath = resolve(projectDir, f);
+        try {
+          const stat = statSync(fullPath);
+          sessions.push({
+            sessionId: f.replace(".jsonl", "").slice(0, 8),
+            jsonlPath: fullPath,
+            fileName: f.replace(".jsonl", ""),
+            mtime: stat.mtime.toISOString(),
+            sizeBytes: stat.size,
+          });
+        } catch {
+          // skip unreadable files
+        }
+      }
+    } catch {
+      // skip
+    }
+  }
+
+  sessions.sort((a, b) => new Date(b.mtime).getTime() - new Date(a.mtime).getTime());
+  return sessions;
 }
 
 export function getClaudeSessions(sessionDirs: string[]): ClaudeSession[] {
@@ -442,6 +501,7 @@ export function findJsonlForSession(
 export interface RecentMessage {
   role: string | undefined;
   text: string;
+  timestamp: string | null;
 }
 
 /** Extract only the text blocks (no tool calls) from the last assistant message */
@@ -475,22 +535,33 @@ export function getLastAssistantText(filePath: string): string {
   }
 }
 
-/** Extract the last N messages as simple role+text pairs for summarization */
+/** Extract the last N messages as simple role+text pairs for summarization.
+ *  If `since` is provided, only return messages after that timestamp. */
 export function getRecentMessages(
   filePath: string,
-  count: number
+  count: number,
+  since?: string
 ): RecentMessage[] {
   try {
     const content = readFileSync(filePath, "utf-8");
     const lines = content.trim().split("\n").filter(Boolean);
     const tail = lines.slice(-count * 3); // read more lines since not all are messages
 
+    const sinceMs = since ? new Date(since).getTime() : 0;
     const results: RecentMessage[] = [];
     for (const line of tail) {
       try {
         const entry: JsonlMessage = JSON.parse(line);
         const { role, content: msgContent } = getMessageParts(entry);
         if (!role) continue;
+
+        const ts = entry.timestamp ?? null;
+
+        // Skip messages older than `since`
+        if (sinceMs && ts) {
+          const entryMs = new Date(ts).getTime();
+          if (entryMs <= sinceMs) continue;
+        }
 
         let text = "";
         if (typeof msgContent === "string") {
@@ -515,7 +586,7 @@ export function getRecentMessages(
         }
 
         if (text) {
-          results.push({ role, text });
+          results.push({ role, text, timestamp: ts });
         }
       } catch {
         // skip malformed lines

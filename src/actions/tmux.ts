@@ -85,8 +85,47 @@ export function sendToTmux(
   }
 }
 
+export function createTmuxSession(name: string, cwd?: string): void {
+  if (!/^[\w-]+$/.test(name)) {
+    throw new Error(`Invalid tmux session name: ${name}`);
+  }
+  const cwdArg = cwd ? ` -c ${shellEscape(cwd)}` : "";
+  execSync(`tmux new-session -d -s ${shellEscape(name)}${cwdArg}`, {
+    encoding: "utf-8",
+    timeout: 5000,
+  });
+}
+
+export function killTmuxSession(name: string): void {
+  if (!/^[\w-]+$/.test(name)) {
+    throw new Error(`Invalid tmux session name: ${name}`);
+  }
+  execSync(`tmux kill-session -t ${shellEscape(name)}`, {
+    encoding: "utf-8",
+    timeout: 5000,
+  });
+}
+
+export function launchClaudeInTmux(sessionName: string, projectPath: string, prompt?: string): void {
+  if (!/^[\w-]+$/.test(sessionName)) {
+    throw new Error(`Invalid tmux session name: ${sessionName}`);
+  }
+
+  // Create session if it doesn't exist
+  if (!tmuxSessionExists(sessionName)) {
+    createTmuxSession(sessionName, projectPath);
+  }
+
+  // Build claude command
+  const cmd = prompt
+    ? `claude -p ${shellEscape(prompt)}`
+    : "claude";
+
+  sendToTmux(sessionName, cmd, true);
+}
+
 /** Shell-escape a string using single quotes */
-function shellEscape(s: string): string {
+export function shellEscape(s: string): string {
   // Wrap in single quotes, escaping any internal single quotes: ' → '\''
   return "'" + s.replace(/'/g, "'\\''") + "'";
 }

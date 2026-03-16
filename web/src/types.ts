@@ -54,14 +54,6 @@ export interface DiscoveredPath {
   lastSeen: string;
 }
 
-export interface ProjectSession {
-  sessionId: string;
-  jsonlPath: string;
-  fileName: string;
-  mtime: string;
-  sizeBytes: number;
-}
-
 export interface GitCommit {
   hash: string;
   date: string;
@@ -86,7 +78,6 @@ export interface GitRepoStatus {
 export interface ProjectDetail {
   project: ProjectRecord;
   agents: AgentRecord[];
-  jsonlSessions: ProjectSession[];
   detectedTmuxSessions: string[];
   gitStatus: GitRepoStatus | null;
 }
@@ -104,4 +95,24 @@ export interface AuditEntry {
 export interface PaginatedResponse<T> {
   data: T[];
   total: number;
+}
+
+export type MessagePart =
+  | { kind: "header"; text: string }
+  | { kind: "text"; text: string }
+  | { kind: "code"; text: string; label?: string }
+  | { kind: "divider" }
+  | { kind: "question"; id: string; tmuxSession: string; question: string; options: string[] }
+  | { kind: "confirm"; actionId: string; session: string; description: string };
+
+export interface Message {
+  parts: MessagePart[];
+}
+
+export interface ChatMessageRecord {
+  id: number;
+  timestamp: string;
+  sender: "user" | "orbit" | "system";
+  userText: string | null;
+  messageJson: string | null;
 }

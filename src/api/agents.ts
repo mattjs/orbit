@@ -26,6 +26,22 @@ export function agentRoutes(config: Config): Hono {
     return c.json(enriched);
   });
 
+  // Live sessions — returns all currently running Claude sessions from tmux, even if not in DB yet
+  app.get("/agents/live", (c) => {
+    try {
+      const sessions = getClaudeSessions(config.claude.sessionDirs);
+      return c.json(sessions.map(s => ({
+        id: s.id,
+        tmuxSession: s.tmuxSession,
+        projectPath: s.projectPath,
+        status: s.status,
+        messageCount: s.messageCount,
+      })));
+    } catch {
+      return c.json([]);
+    }
+  });
+
   app.get("/agents/:id", (c) => {
     const id = c.req.param("id");
     const agent = getAgent(id);

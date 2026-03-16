@@ -242,7 +242,7 @@ function deriveStatus(
     return { status: "idle", waitingQuestion: null, waitingPrompt: null };
   }
 
-  return { status: "idle", waitingQuestion: null };
+  return { status: "idle", waitingQuestion: null, waitingPrompt: null };
 }
 
 function buildSummary(
@@ -422,47 +422,6 @@ function parseJsonlFile(filePath: string, agent: LiveAgent): ClaudeSession | nul
   }
 }
 
-export interface ProjectSession {
-  sessionId: string;
-  jsonlPath: string;
-  fileName: string;
-  mtime: string;
-  sizeBytes: number;
-}
-
-export function listProjectSessions(sessionDirs: string[], projectCwd: string): ProjectSession[] {
-  const encoded = projectCwd.replace(/\//g, "-");
-  const sessions: ProjectSession[] = [];
-
-  for (const dir of sessionDirs) {
-    const projectDir = resolve(dir, encoded);
-    if (!existsSync(projectDir)) continue;
-
-    try {
-      const files = readdirSync(projectDir).filter((f) => f.endsWith(".jsonl"));
-      for (const f of files) {
-        const fullPath = resolve(projectDir, f);
-        try {
-          const stat = statSync(fullPath);
-          sessions.push({
-            sessionId: f.replace(".jsonl", "").slice(0, 8),
-            jsonlPath: fullPath,
-            fileName: f.replace(".jsonl", ""),
-            mtime: stat.mtime.toISOString(),
-            sizeBytes: stat.size,
-          });
-        } catch {
-          // skip unreadable files
-        }
-      }
-    } catch {
-      // skip
-    }
-  }
-
-  sessions.sort((a, b) => new Date(b.mtime).getTime() - new Date(a.mtime).getTime());
-  return sessions;
-}
 
 export function getClaudeSessions(sessionDirs: string[]): ClaudeSession[] {
   const agents = findLiveAgents();
@@ -532,6 +491,104 @@ export function getLastAssistantText(filePath: string): string {
     return "";
   } catch {
     return "";
+  }
+}
+
+/**
+ * Walk backward through assistant messages to find the last one with substantive text.
+ * Unlike getLastAssistantText, this skips over tool-call-only messages (up to `maxLookback`)
+ * to find the most recent message where the agent actually communicated something.
+ * Returns the text and how many messages back it was found.
+ */
+export function getLastSubstantiveText(filePath: string, maxLookback = 10): { text: string; messagesBack: number } {
+  try {
+    const content = readFileSync(filePath, "utf-8");
+    const lines = content.trim().split("\n").filter(Boolean);
+
+    let assistantsSeen = 0;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const entry: JsonlMessage = JSON.parse(lines[i]);
+        const { role, content: msgContent } = getMessageParts(entry);
+        if (role !== "assistant") continue;
+        if (!Array.isArray(msgContent)) continue;
+
+        assistantsSeen++;
+        if (assistantsSeen > maxLookback) break;
+
+        const textParts: string[] = [];
+        for (const block of msgContent) {
+          if (block.type === "text" && block.text) {
+            textParts.push(block.text);
+          }
+        }
+
+        const combined = textParts.join("\n\n").trim();
+        // Skip very short text that's just filler ("Let me...", "I'll...")
+        if (combined.length > 50) {
+          return { text: combined, messagesBack: assistantsSeen };
+        }
+      } catch {
+        // skip
+      }
+    }
+    return { text: "", messagesBack: 0 };
+  } catch {
+    return { text: "", messagesBack: 0 };
+  }
+}
+
+/**
+ * Extract a structured work summary from the JSONL: files edited, tools used,
+ * and the git diff --stat if available. This gives a concrete picture of what
+ * the agent actually did, independent of the LLM summary.
+ */
+export function getWorkSummary(filePath: string, sinceLineIndex?: number): {
+  filesEdited: string[];
+  filesRead: string[];
+  bashCommands: string[];
+  toolCounts: Record<string, number>;
+} {
+  try {
+    const content = readFileSync(filePath, "utf-8");
+    const lines = content.trim().split("\n").filter(Boolean);
+    const startIdx = sinceLineIndex ?? Math.max(0, lines.length - 200);
+
+    const filesEdited = new Set<string>();
+    const filesRead = new Set<string>();
+    const bashCommands: string[] = [];
+    const toolCounts: Record<string, number> = {};
+
+    for (let i = startIdx; i < lines.length; i++) {
+      try {
+        const entry: JsonlMessage = JSON.parse(lines[i]);
+        const { role, content: msgContent } = getMessageParts(entry);
+        if (role !== "assistant" || !Array.isArray(msgContent)) continue;
+
+        for (const block of msgContent) {
+          if (block.type !== "tool_use" || !block.name) continue;
+          toolCounts[block.name] = (toolCounts[block.name] || 0) + 1;
+          const input = block.input;
+
+          if ((block.name === "Edit" || block.name === "Write") && typeof input?.file_path === "string") {
+            filesEdited.add(input.file_path);
+          } else if (block.name === "Read" && typeof input?.file_path === "string") {
+            filesRead.add(input.file_path);
+          } else if (block.name === "Bash" && typeof input?.command === "string") {
+            bashCommands.push(input.command.slice(0, 200));
+          }
+        }
+      } catch { /* skip */ }
+    }
+
+    return {
+      filesEdited: [...filesEdited],
+      filesRead: [...filesRead],
+      bashCommands: bashCommands.slice(-10),
+      toolCounts,
+    };
+  } catch {
+    return { filesEdited: [], filesRead: [], bashCommands: [], toolCounts: {} };
   }
 }
 

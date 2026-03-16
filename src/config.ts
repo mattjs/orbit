@@ -51,18 +51,17 @@ export function loadConfig(configPath?: string): Config {
   const raw = readFileSync(path, "utf-8");
   const parsed = parse(raw);
 
-  if (!parsed?.slack?.appToken || !parsed?.slack?.botToken) {
-    throw new Error("Config must include slack.appToken and slack.botToken");
-  }
-  if (!parsed?.slack?.channel) {
-    throw new Error("Config must include slack.channel");
-  }
+  const hasSlack = parsed?.slack?.appToken && parsed?.slack?.botToken && parsed?.slack?.channel;
 
   return {
-    slack: {
+    slack: hasSlack ? {
       appToken: parsed.slack.appToken,
       botToken: parsed.slack.botToken,
       channel: parsed.slack.channel,
+    } : {
+      appToken: "",
+      botToken: "",
+      channel: "cli",
     },
     claude: {
       sessionDirs: parsed.claude?.sessionDirs ?? [

@@ -72,12 +72,33 @@ export function getDb(): Database.Database {
       tmux_session TEXT,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp TEXT NOT NULL,
+      sender TEXT NOT NULL,
+      user_text TEXT,
+      message_json TEXT,
+      project_path TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_chat_messages_id ON chat_messages(id);
   `);
 
   // Schema migrations
   const projectCols = db.prepare("PRAGMA table_info(projects)").all() as { name: string }[];
   if (projectCols.length > 0 && !projectCols.some((c) => c.name === "git_url")) {
     db.exec("ALTER TABLE projects ADD COLUMN git_url TEXT");
+  }
+
+  const chatCols = db.prepare("PRAGMA table_info(chat_messages)").all() as { name: string }[];
+  if (chatCols.length > 0 && !chatCols.some((c) => c.name === "project_path")) {
+    db.exec("ALTER TABLE chat_messages ADD COLUMN project_path TEXT");
   }
 
   const cols = db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
@@ -187,6 +208,7 @@ export function getHistory(since?: Date): SessionSnapshot[] {
 
 export function getSnapshotsPaginated(opts: {
   sessionId?: string;
+  projectPath?: string;
   status?: string;
   since?: string;
   until?: string;
@@ -200,6 +222,10 @@ export function getSnapshotsPaginated(opts: {
   if (opts.sessionId) {
     conditions.push("session_id = ?");
     params.push(opts.sessionId);
+  }
+  if (opts.projectPath) {
+    conditions.push("session_id IN (SELECT session_id FROM agents WHERE project_path = ?)");
+    params.push(opts.projectPath);
   }
   if (opts.status) {
     conditions.push("status = ?");
@@ -274,6 +300,7 @@ export function getAuditPaginated(opts: {
   limit?: number;
   offset?: number;
   target?: string;
+  targetLike?: string;
 }): { data: AuditEntry[]; total: number } {
   const d = getDb();
   const limit = Math.min(opts.limit ?? 50, 200);
@@ -282,6 +309,7 @@ export function getAuditPaginated(opts: {
   const conditions: string[] = [];
   const params: any[] = [];
   if (opts.target) { conditions.push("target = ?"); params.push(opts.target); }
+  if (opts.targetLike) { conditions.push("target LIKE ?"); params.push(opts.targetLike); }
   const where = conditions.length ? "WHERE " + conditions.join(" AND ") : "";
 
   const total = (d.prepare(`SELECT COUNT(*) as cnt FROM audit_entries ${where}`).get(...params) as any).cnt;
@@ -362,6 +390,24 @@ export function getDistinctProjectPaths(): { projectPath: string; agentCount: nu
   }));
 }
 
+// --- Settings functions ---
+
+export function getSetting(key: string): string | null {
+  const d = getDb();
+  const row = d.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setSetting(key: string, value: string): void {
+  const d = getDb();
+  d.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(key, value);
+}
+
+export function deleteSetting(key: string): void {
+  const d = getDb();
+  d.prepare("DELETE FROM settings WHERE key = ?").run(key);
+}
+
 // --- Project functions ---
 
 export interface ProjectRecord {
@@ -440,6 +486,74 @@ export function deleteProject(id: number): boolean {
   const d = getDb();
   const result = d.prepare("DELETE FROM projects WHERE id = ?").run(id);
   return result.changes > 0;
+}
+
+// --- Chat message functions ---
+
+export interface ChatMessageRecord {
+  id: number;
+  timestamp: string;
+  sender: "user" | "orbit" | "system";
+  userText: string | null;
+  messageJson: string | null;
+  projectPath: string | null;
+}
+
+const CHAT_MESSAGE_LIMIT = 200;
+
+export function appendChatMessage(entry: {
+  timestamp: string;
+  sender: string;
+  userText?: string;
+  messageJson?: string;
+  projectPath?: string;
+}): number {
+  const d = getDb();
+  const result = d.prepare(`
+    INSERT INTO chat_messages (timestamp, sender, user_text, message_json, project_path)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(
+    entry.timestamp,
+    entry.sender,
+    entry.userText ?? null,
+    entry.messageJson ?? null,
+    entry.projectPath ?? null
+  );
+
+  // Prune old messages beyond the limit
+  d.prepare(`
+    DELETE FROM chat_messages WHERE id NOT IN (
+      SELECT id FROM chat_messages ORDER BY id DESC LIMIT ?
+    )
+  `).run(CHAT_MESSAGE_LIMIT);
+
+  return result.lastInsertRowid as number;
+}
+
+export function getRecentChatMessages(limit = 100, projectPath?: string): ChatMessageRecord[] {
+  const d = getDb();
+  const capped = Math.min(limit, CHAT_MESSAGE_LIMIT);
+
+  let rows: any[];
+  if (projectPath) {
+    // Show messages for this project + global messages (no project)
+    rows = d.prepare(
+      "SELECT * FROM chat_messages WHERE project_path = ? OR project_path IS NULL ORDER BY id DESC LIMIT ?"
+    ).all(projectPath, capped);
+  } else {
+    rows = d.prepare(
+      "SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?"
+    ).all(capped);
+  }
+
+  return rows.map((r) => ({
+    id: r.id,
+    timestamp: r.timestamp,
+    sender: r.sender,
+    userText: r.user_text ?? null,
+    messageJson: r.message_json ?? null,
+    projectPath: r.project_path ?? null,
+  })).reverse(); // oldest first for display
 }
 
 // --- Migration ---

@@ -199,6 +199,7 @@ export class SlackAdapter implements MessagingAdapter {
       const trimmed = raw.trim();
       const match = this.matchQuestionOption(trimmed, pending.options);
       if (match !== null) {
+        console.log(`[slack] Resolved pending question for ${pending.sessionId}: "${match}"`);
         this.pendingQuestions.delete(channel);
         if (this.questionHandler) {
           try {
@@ -210,6 +211,8 @@ export class SlackAdapter implements MessagingAdapter {
           }
         }
         return true;
+      } else {
+        console.log(`[slack] Pending question for ${pending.sessionId} didn't match input "${trimmed}" (options: ${pending.options.join(", ")})`);
       }
     }
 
@@ -267,6 +270,22 @@ export class SlackAdapter implements MessagingAdapter {
       if (opt.toLowerCase() === lower) return opt;
     }
 
+    // Try prefix match (e.g. "yes" matches "Yes, proceed")
+    for (const opt of options) {
+      if (opt.toLowerCase().startsWith(lower)) return opt;
+    }
+
+    // Common affirmative/negative shortcuts
+    const yesOptions = options.filter((o) => /^(yes|y$|allow|approve|accept|proceed|continue)/i.test(o));
+    const noOptions = options.filter((o) => /^(no|n$|deny|reject|cancel|skip|don.?t)/i.test(o));
+
+    if (/^(y|yes|yep|yeah|sure|ok|do it|approve|go ahead)$/i.test(lower) && yesOptions.length === 1) {
+      return yesOptions[0];
+    }
+    if (/^(n|no|nope|nah|cancel|skip|deny|reject)$/i.test(lower) && noOptions.length === 1) {
+      return noOptions[0];
+    }
+
     return null;
   }
 
@@ -305,6 +324,7 @@ export class SlackAdapter implements MessagingAdapter {
   private registerPending(channel: string, message: Message): void {
     for (const part of message.parts) {
       if (part.kind === "question") {
+        console.log(`[slack] Registered pending question for ${part.id} in ${channel}: ${part.options.join(", ")}`);
         this.pendingQuestions.set(channel, {
           sessionId: part.id,
           tmuxSession: part.tmuxSession,
@@ -312,6 +332,7 @@ export class SlackAdapter implements MessagingAdapter {
           expiresAt: Date.now() + PENDING_TTL_MS,
         });
       } else if (part.kind === "confirm") {
+        console.log(`[slack] Registered pending confirm ${part.actionId} for ${part.session}`);
         this.pendingConfirms.set(part.actionId, {
           actionId: part.actionId,
           session: part.session,
@@ -325,10 +346,16 @@ export class SlackAdapter implements MessagingAdapter {
   private cleanupExpired(): void {
     const now = Date.now();
     for (const [key, q] of this.pendingQuestions) {
-      if (now > q.expiresAt) this.pendingQuestions.delete(key);
+      if (now > q.expiresAt) {
+        console.log(`[slack] Expired pending question for ${q.sessionId} (channel ${key})`);
+        this.pendingQuestions.delete(key);
+      }
     }
     for (const [key, c] of this.pendingConfirms) {
-      if (now > c.expiresAt) this.pendingConfirms.delete(key);
+      if (now > c.expiresAt) {
+        console.log(`[slack] Expired pending confirm ${c.actionId}`);
+        this.pendingConfirms.delete(key);
+      }
     }
   }
 

@@ -16,11 +16,15 @@ function timeAgo(iso: string): string {
   return `${days}d ${hours % 24}h ago`;
 }
 
-function AgentCard({ agent }: { agent: AgentRecord }) {
+function AgentCard({ agent, compact }: { agent: AgentRecord; compact?: boolean }) {
   return (
     <Link
       to={`/agents/${encodeURIComponent(agent.sessionId)}`}
-      className="block bg-gray-800/50 border border-gray-700/50 rounded p-3 hover:border-gray-600 transition-colors"
+      className={`block rounded p-3 hover:border-gray-600 transition-colors ${
+        compact
+          ? "bg-gray-800/30 border border-gray-700/30"
+          : "bg-gray-800/50 border border-gray-700/50"
+      }`}
     >
       <div className="flex items-center justify-between mb-1">
         <div className="flex items-center gap-2">
@@ -39,6 +43,54 @@ function AgentCard({ agent }: { agent: AgentRecord }) {
         <span>{agent.totalSnapshots} snapshots</span>
       </div>
     </Link>
+  );
+}
+
+/** Group agents by tmux session, show only the primary (live or most recent) and collapse the rest */
+function TmuxGroupedAgents({ agents }: { agents: AgentRecord[] }) {
+  const [showStale, setShowStale] = useState(false);
+
+  // Group by tmux session (null → "ungrouped")
+  const groups = new Map<string, AgentRecord[]>();
+  for (const a of agents) {
+    const key = a.tmuxSession ?? "_ungrouped";
+    const list = groups.get(key) || [];
+    list.push(a);
+    groups.set(key, list);
+  }
+
+  const allPrimary: AgentRecord[] = [];
+  const allStale: AgentRecord[] = [];
+
+  for (const [, group] of groups) {
+    // Live agent is primary, otherwise most recent by lastSeen
+    const sorted = [...group].sort((a, b) => {
+      if (a.live !== b.live) return a.live ? -1 : 1;
+      return new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime();
+    });
+    allPrimary.push(sorted[0]);
+    allStale.push(...sorted.slice(1));
+  }
+
+  return (
+    <div className="grid gap-2">
+      {allPrimary.map((agent) => (
+        <AgentCard key={agent.sessionId} agent={agent} />
+      ))}
+      {allStale.length > 0 && (
+        <>
+          <button
+            onClick={() => setShowStale(!showStale)}
+            className="text-xs text-gray-500 hover:text-gray-400 text-left px-1 py-1"
+          >
+            {showStale ? "Hide" : "Show"} {allStale.length} older session{allStale.length !== 1 ? "s" : ""}
+          </button>
+          {showStale && allStale.map((agent) => (
+            <AgentCard key={agent.sessionId} agent={agent} compact />
+          ))}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -153,7 +205,7 @@ function AddProjectForm({ onCreated, discoveredPaths }: { onCreated: () => void;
           <input autoFocus value={gitUrl} onChange={(e) => onGitUrlChange(e.target.value)} placeholder="https://github.com/owner/repo.git"
             className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200 font-mono" />
         </div>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label className="block text-xs text-gray-500 mb-1">Clone to</label>
             <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/root/repo"
@@ -180,7 +232,7 @@ function AddProjectForm({ onCreated, discoveredPaths }: { onCreated: () => void;
   return (
     <form onSubmit={handleAdd} className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-3">
       <div className="text-sm font-medium text-gray-300 mb-1">Add Existing Project</div>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
           <label className="block text-xs text-gray-500 mb-1">Name</label>
           <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="My Project"
@@ -274,15 +326,14 @@ function ProjectCard({ project, agents }: { project: ProjectSummary; agents: Age
   const liveCount = agents.filter((a) => a.live).length;
 
   return (
-    <div className="border-l-2 border-blue-500/50">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-800/30 transition-colors text-left"
+    <div className="bg-gray-900/40 border border-gray-800 rounded-lg overflow-hidden hover:border-gray-700 transition-colors">
+      <Link
+        to={`/projects/${project.id}`}
+        className="flex flex-wrap items-center justify-between gap-2 px-4 py-3"
       >
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-gray-600">{expanded ? "v" : ">"}</span>
-          <div>
-            <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="text-sm font-medium text-gray-200">{project.name}</span>
               {liveCount > 0 && (
                 <span className="inline-block w-2 h-2 rounded-full bg-green-500" title={`${liveCount} live`} />
@@ -291,28 +342,29 @@ function ProjectCard({ project, agents }: { project: ProjectSummary; agents: Age
                 <span key={s} className="text-xs bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded font-mono">{s}</span>
               ))}
             </div>
-            <span className="text-xs text-gray-500">{project.path}</span>
+            <span className="text-xs text-gray-500 break-all">{project.path}</span>
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-gray-500">
-            {project.agentCount} agent{project.agentCount !== 1 ? "s" : ""}
-          </span>
-          <Link
-            to={`/projects/${project.id}`}
-            onClick={(e) => e.stopPropagation()}
-            className="text-xs text-blue-400 hover:text-blue-300"
-          >
-            Details
-          </Link>
-        </div>
-      </button>
+        <span className="text-xs text-gray-500 shrink-0">
+          {project.agentCount} agent{project.agentCount !== 1 ? "s" : ""}
+          {project.lastSeen && <span className="ml-2">{timeAgo(project.lastSeen)}</span>}
+        </span>
+      </Link>
 
-      {expanded && agents.length > 0 && (
-        <div className="px-4 pb-3 grid gap-2">
-          {agents.map((agent) => (
-            <AgentCard key={agent.sessionId} agent={agent} />
-          ))}
+      {agents.length > 0 && (
+        <div className="border-t border-gray-800/60">
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="w-full flex items-center gap-2 px-4 py-1.5 text-xs text-gray-500 hover:text-gray-400 hover:bg-gray-800/30 transition-colors"
+          >
+            <span>{expanded ? "\u25BC" : "\u25B6"}</span>
+            <span>{agents.filter(a => a.live).length} live, {agents.length} total agent{agents.length !== 1 ? "s" : ""}</span>
+          </button>
+          {expanded && (
+            <div className="px-4 pb-3">
+              <TmuxGroupedAgents agents={agents} />
+            </div>
+          )}
         </div>
       )}
     </div>

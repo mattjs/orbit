@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { statSync } from "fs";
 import type { ClaudeSession, SessionStatus, WaitingPrompt } from "./monitors/claude.js";
-import { getRecentMessages, getLastAssistantText, findJsonlForSession } from "./monitors/claude.js";
+import { getRecentMessages, getLastAssistantText, getLastSubstantiveText, getWorkSummary, findJsonlForSession } from "./monitors/claude.js";
 import { appendSnapshot, getLatestSnapshot } from "./history.js";
 import { loadConfig } from "./config.js";
 
@@ -121,13 +121,29 @@ function buildMessageExcerpt(jsonlPath: string, since?: string): string {
   if (messages.length === 0) return "";
 
   const parts: string[] = [];
+
+  // Include the work summary for concrete context
+  const work = getWorkSummary(jsonlPath);
+  if (work.filesEdited.length > 0) {
+    parts.push(`[FILES EDITED] ${work.filesEdited.join(", ")}`);
+  }
+
   for (const msg of messages) {
     const role = msg.role?.toUpperCase() || "SYSTEM";
     const text = msg.text || "";
     if (text) {
-      parts.push(`[${role}] ${text.slice(0, 300)}`);
+      // Give more room to assistant text (the substance), less to tool noise
+      const limit = role === "ASSISTANT" ? 600 : 300;
+      parts.push(`[${role}] ${text.slice(0, limit)}`);
     }
   }
+
+  // Include last substantive text if it wasn't captured in the window
+  const lastSub = getLastSubstantiveText(jsonlPath);
+  if (lastSub.text && lastSub.messagesBack > 1) {
+    parts.push(`[ASSISTANT LAST SUBSTANTIVE OUTPUT] ${lastSub.text.slice(0, 600)}`);
+  }
+
   return parts.join("\n\n");
 }
 

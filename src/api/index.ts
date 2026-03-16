@@ -9,8 +9,10 @@ import { auditRoutes } from "./audit.js";
 import { agentRoutes } from "./agents.js";
 import { projectRoutes } from "./projects.js";
 import { tmuxRoutes } from "./tmux.js";
+import { chatRoutes, type ChatHandlers } from "./chat.js";
+import { setRecordingEnabled, isRecording, listRecordings, getActiveRecordings, loadRecording } from "../monitors/recorder.js";
 
-export function createApi(config: Config): Hono {
+export function createApi(config: Config, chatHandlers?: ChatHandlers): Hono {
   const app = new Hono();
 
   // Health check — no auth
@@ -27,6 +29,23 @@ export function createApi(config: Config): Hono {
   app.route("/api", agentRoutes(config));
   app.route("/api", projectRoutes(config));
   app.route("/api", tmuxRoutes());
+  if (chatHandlers) {
+    app.route("/api", chatRoutes(chatHandlers));
+  }
+
+  // Recording API
+  app.get("/api/recordings", (c) => {
+    return c.json({ enabled: isRecording(), active: getActiveRecordings(), recordings: listRecordings() });
+  });
+  app.post("/api/recordings/toggle", async (c) => {
+    const body = await c.req.json<{ enabled: boolean }>();
+    setRecordingEnabled(body.enabled);
+    return c.json({ enabled: isRecording() });
+  });
+  app.get("/api/recordings/:sessionId/:timestamp", (c) => {
+    const polls = loadRecording(c.req.param("sessionId"), c.req.param("timestamp"));
+    return c.json(polls);
+  });
 
   // Serve static files from web/dist if it exists
   // serveStatic root is relative to CWD

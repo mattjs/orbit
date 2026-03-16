@@ -478,13 +478,18 @@ export function formatWaitingPrompt(
     `**Needs input:**\n> ${prompt.question.split("\n").map(l => l.slice(0, 300)).join("\n> ")}`
   ));
 
-  parts.push({
-    kind: "question",
-    id: sessionId,
-    tmuxSession,
-    question: prompt.question,
-    options: prompt.options.length > 0 ? prompt.options : ["yes", "no"],
-  });
+  if (prompt.options.length > 0) {
+    parts.push({
+      kind: "question",
+      id: sessionId,
+      tmuxSession,
+      question: prompt.question,
+      options: prompt.options,
+    });
+  } else {
+    // Open-ended question — no buttons, user replies with free text
+    parts.push(text(`_Reply directly or use_ \`focus ${tmuxSession}\` _to send your answer._`));
+  }
 
   return msg(...parts);
 }
@@ -502,7 +507,8 @@ export function formatWatcherUpdate(
   sessionId: string,
   tmuxSession: string,
   current: SessionState,
-  prev: SessionState | undefined
+  prev: SessionState | undefined,
+  lastResponse?: string
 ): Message {
   const emoji = STATUS_EMOJI[current.status];
   const parts: MessagePart[] = [];
@@ -520,7 +526,10 @@ export function formatWatcherUpdate(
     return msg(...parts);
   }
 
-  if (current.summary) {
+  // When agent just finished, show actual response instead of summary
+  if (lastResponse) {
+    parts.push(text(lastResponse.slice(0, 3000)));
+  } else if (current.summary) {
     parts.push(text(
       `${emoji} \`${sessionId}\` (${tmuxSession})\n> ${current.summary.replace(/\n/g, " ")}`
     ));
@@ -534,36 +543,75 @@ export function formatActiveWatchResult(
   tmuxSession: string,
   snapshot: SessionSnapshot,
   newMessages: number,
-  commandText?: string
+  commandText?: string,
+  lastResponse?: string,
+  work?: { filesEdited: string[]; toolCounts: Record<string, number> },
+  gitDiff?: string
 ): Message {
   const emoji = STATUS_EMOJI[snapshot.status];
   const parts: MessagePart[] = [];
 
   const headerText = commandText
-    ? `After sending \`${commandText}\` to \`${tmuxSession}\` (${newMessages} new messages):`
-    : `Follow-up from \`${tmuxSession}\` (${newMessages} new messages):`;
+    ? `After sending \`${commandText}\` to \`${tmuxSession}\`:`
+    : `Response from \`${tmuxSession}\`:`;
 
   parts.push(text(headerText));
 
   if (snapshot.status === "waiting" && snapshot.waitingPrompt) {
+    if (lastResponse) {
+      parts.push(text(lastResponse.slice(0, 3000)));
+      parts.push({ kind: "divider" });
+    }
     parts.push(text(
       `**Needs input:**\n> ${snapshot.waitingPrompt.question.split("\n")[0].slice(0, 200)}`
     ));
-    parts.push({
-      kind: "question",
-      id: sessionId,
-      tmuxSession,
-      question: snapshot.waitingPrompt.question,
-      options: snapshot.waitingPrompt.options.length > 0 ? snapshot.waitingPrompt.options : ["yes", "no"],
-    });
+    if (snapshot.waitingPrompt.options.length > 0) {
+      parts.push({
+        kind: "question",
+        id: sessionId,
+        tmuxSession,
+        question: snapshot.waitingPrompt.question,
+        options: snapshot.waitingPrompt.options,
+      });
+    } else {
+      parts.push(text(`_Reply directly or use_ \`focus ${tmuxSession}\` _to send your answer._`));
+    }
   } else if (snapshot.status === "waiting" && snapshot.waitingQuestion) {
+    if (lastResponse) {
+      parts.push(text(lastResponse.slice(0, 3000)));
+      parts.push({ kind: "divider" });
+    }
     parts.push(text(
       `${emoji} \`${sessionId}\` needs input:\n> ${snapshot.waitingQuestion.split("\n")[0].slice(0, 200)}`
     ));
+  } else if (lastResponse) {
+    // Show the actual agent response, not a summary
+    parts.push(text(lastResponse.slice(0, 3000)));
   } else if (snapshot.summary) {
+    // Fallback to summary if no response text
     parts.push(text(
       `${emoji} \`${sessionId}\`\n> ${snapshot.summary.replace(/\n/g, " ")}`
     ));
+  }
+
+  // Append work context: files changed and git diff
+  const contextLines: string[] = [];
+  if (work?.filesEdited && work.filesEdited.length > 0) {
+    contextLines.push(`**Files changed:** ${work.filesEdited.map(f => `\`${f}\``).join(", ")}`);
+  }
+  if (work?.toolCounts && Object.keys(work.toolCounts).length > 0) {
+    contextLines.push(`**Tools:** ${formatToolCounts(work.toolCounts)}`);
+  }
+  if (gitDiff) {
+    contextLines.push(`**Git diff:**`);
+  }
+
+  if (contextLines.length > 0) {
+    parts.push(divider());
+    parts.push(text(contextLines.join("\n")));
+    if (gitDiff) {
+      parts.push({ kind: "code", text: gitDiff.slice(0, 1500), label: "git diff --stat" });
+    }
   }
 
   return msg(...parts);

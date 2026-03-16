@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { useAgentFilter } from "../agentFilter";
+import { useProjectFilter } from "../agentFilter";
 import type { SessionSnapshot, PaginatedResponse } from "../types";
 import { StatusBadge } from "./StatusBadge";
 import { Pagination } from "./Pagination";
@@ -13,13 +13,13 @@ function formatTime(iso: string): string {
 }
 
 export function Timeline() {
-  const { selectedAgent } = useAgentFilter();
+  const { selectedProjectPath } = useProjectFilter();
   const [data, setData] = useState<PaginatedResponse<SessionSnapshot>>({ data: [], total: 0 });
   const [offset, setOffset] = useState(0);
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => { setOffset(0); }, [selectedAgent]);
+  useEffect(() => { setOffset(0); }, [selectedProjectPath]);
 
   useEffect(() => {
     setLoading(true);
@@ -28,13 +28,13 @@ export function Timeline() {
       offset: String(offset),
     };
     if (status) params.status = status;
-    if (selectedAgent) params.sessionId = selectedAgent;
+    if (selectedProjectPath) params.projectPath = selectedProjectPath;
     api.getSnapshots(params).then(setData).finally(() => setLoading(false));
-  }, [offset, status, selectedAgent]);
+  }, [offset, status, selectedProjectPath]);
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
         <h2 className="text-lg font-semibold">Timeline</h2>
         <select
           value={status}
@@ -63,12 +63,12 @@ export function Timeline() {
               key={i}
               className="bg-gray-900 border border-gray-800 rounded p-3"
             >
-              <div className="flex items-center justify-between mb-1">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
                 <div className="flex items-center gap-2">
                   <code className="text-xs text-gray-400">{snap.sessionId}</code>
                   <StatusBadge status={snap.status} />
                 </div>
-                <span className="text-xs text-gray-500">
+                <span className="text-xs text-gray-500 shrink-0">
                   {formatTime(snap.timestamp)}
                 </span>
               </div>

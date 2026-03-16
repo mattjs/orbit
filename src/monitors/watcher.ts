@@ -1,13 +1,27 @@
 import type { Config } from "../config.js";
 import type { Message } from "../messages.js";
 import type { SessionStatus, WaitingPrompt } from "./claude.js";
-import { getClaudeSessions, findJsonlForSession } from "./claude.js";
+import { getClaudeSessions, findJsonlForSession, getLastAssistantText, getLastSubstantiveText, getWorkSummary } from "./claude.js";
+import { captureTmuxPane } from "../actions/tmux.js";
 import { summarizeSession } from "../summarizer.js";
 import {
   formatWaitingPrompt,
   formatWatcherUpdate,
   formatActiveWatchResult,
 } from "../formatters.js";
+import { isRecording, startRecording, recordPoll, stopRecording } from "./recorder.js";
+import simpleGit from "simple-git";
+
+/** Get a compact git diff --stat for a project directory. Returns empty string on failure. */
+async function getGitDiffStat(projectPath: string): Promise<string> {
+  try {
+    const git = simpleGit(projectPath);
+    const diff = await git.diff(["--stat"]);
+    return diff.trim();
+  } catch {
+    return "";
+  }
+}
 
 type PostMessage = (channel: string, message: Message, threadId?: string) => Promise<string | undefined>;
 
@@ -30,6 +44,7 @@ interface ActiveWatch {
   commandText?: string;
   startedAt: number;
   intervalId: ReturnType<typeof setInterval> | null;
+  posted: boolean;
 }
 
 // Track last known state per session
@@ -90,6 +105,10 @@ export function startAgentWatcher(
 
         // First-seen: record state but don't post (avoids startup dump)
         if (!prev) {
+          if (isRecording()) {
+            startRecording(session, "background");
+            recordPoll(session, jsonlPath, { action: "first_seen", reasons: ["initial discovery"] });
+          }
           lastSeen.set(session.id, current);
           continue;
         }
@@ -99,13 +118,20 @@ export function startAgentWatcher(
         const enoughMessages = messageDelta >= messageThreshold;
         const statusChanged = prev.status !== current.status;
         const nowWaiting = current.status === "waiting" && current.waitingQuestion;
-        const wasWaiting = prev.status === "waiting";
+        const newQuestion = nowWaiting && current.waitingQuestion !== prev.waitingQuestion;
 
         const shouldPost = enoughMessages
           || statusChanged
-          || (nowWaiting && !wasWaiting);
+          || newQuestion;
 
         if (shouldPost) {
+          const reasonList = [
+            enoughMessages && `messages(+${messageDelta})`,
+            statusChanged && `status(${prev.status}→${current.status})`,
+            newQuestion && "new_question",
+          ].filter(Boolean) as string[];
+          console.log(`[watcher] Posting for ${session.id} (${session.tmuxSession}): ${reasonList.join(", ")}`);
+
           // Only call the LLM when we're actually going to post
           try {
             const snapshot = await summarizeSession(session, jsonlPath, true);
@@ -114,18 +140,54 @@ export function startAgentWatcher(
             console.error(`[watcher] Summary failed for ${session.id}:`, err);
           }
 
+          let message: Message | undefined;
+          let lastResponse: string | undefined;
           try {
             const isWaitingPrompt = current.status === "waiting" && current.waitingPrompt;
 
-            const message = isWaitingPrompt
+            if (isWaitingPrompt) {
+              console.log(`[watcher] Sending waiting prompt for ${session.id}: ${current.waitingPrompt!.question.slice(0, 100)}`);
+            }
+
+            // Include actual last response when agent transitions to idle or waiting
+            const justFinished = statusChanged && (current.status === "idle" || current.status === "waiting")
+              && prev && prev.status !== "idle" && prev.status !== "waiting";
+            if (justFinished) {
+              lastResponse = getLastAssistantText(jsonlPath);
+              // Walk back further if last message was tool-call-only
+              if (!lastResponse) {
+                lastResponse = getLastSubstantiveText(jsonlPath).text;
+              }
+              // Fall back to tmux capture
+              if (!lastResponse) {
+                try { lastResponse = captureTmuxPane(session.tmuxSession); } catch { /* ignore */ }
+              }
+            }
+
+            message = isWaitingPrompt
               ? formatWaitingPrompt(session.id, session.tmuxSession, current.summary, current.waitingPrompt!)
-              : formatWatcherUpdate(session.id, session.tmuxSession, current, prev);
+              : formatWatcherUpdate(session.id, session.tmuxSession, current, prev, lastResponse);
 
             await postMessage(config.slack.channel, message, undefined);
             current.messageCountAtLastPost = current.messageCount;
+            console.log(`[watcher] Posted update for ${session.id}`);
           } catch (err) {
             console.error(`[watcher] Failed to post update for ${session.id}:`, err);
+            if (isRecording()) {
+              recordPoll(session, jsonlPath, { action: "post", reasons: reasonList }, message, lastResponse, String(err));
+            }
           }
+
+          if (isRecording()) {
+            recordPoll(session, jsonlPath, { action: "post", reasons: reasonList }, message, lastResponse);
+          }
+        } else if (isRecording()) {
+          const skipReasons = [
+            !enoughMessages && `messages(+${messageDelta})<threshold`,
+            !statusChanged && `status(${current.status})=unchanged`,
+            !newQuestion && "no_new_question",
+          ].filter(Boolean) as string[];
+          recordPoll(session, jsonlPath, { action: "skip", reasons: skipReasons });
         }
 
         lastSeen.set(session.id, current);
@@ -176,7 +238,8 @@ export function startActiveWatch(
   const existing = activeWatches.get(sessionId);
   if (existing?.intervalId) clearInterval(existing.intervalId);
 
-  const timeoutMs = 15_000;
+  const baseTimeoutMs = 15_000;
+  const hardTimeoutMs = 120_000;
   const pollMs = 5_000;
 
   const watch: ActiveWatch = {
@@ -188,7 +251,69 @@ export function startActiveWatch(
     commandText,
     startedAt: Date.now(),
     intervalId: null,
+    posted: false,
   };
+
+  async function postResult() {
+    try {
+      const session = getClaudeSessions(config.claude.sessionDirs).find(s => s.id === sessionId);
+      if (!session) return;
+
+      const jsonlPath = findJsonlForSession(config.claude.sessionDirs, session);
+      if (!jsonlPath) return;
+
+      const snapshot = await summarizeSession(session, jsonlPath, true);
+      const newMessages = session.messageCount - watch.startMessageCount;
+
+      // Try multiple strategies to get the agent's response text:
+      // 1. Last assistant text (immediate last message)
+      let lastResponse = getLastAssistantText(jsonlPath);
+
+      // 2. Walk back further to find substantive text (skips tool-call-only messages)
+      if (!lastResponse) {
+        const substantive = getLastSubstantiveText(jsonlPath);
+        lastResponse = substantive.text;
+      }
+
+      // 3. Fall back to tmux capture
+      if (!lastResponse) {
+        try {
+          lastResponse = captureTmuxPane(tmuxSession);
+        } catch { /* ignore */ }
+      }
+
+      // Get work summary for context — only include if the agent actually did file work
+      const work = getWorkSummary(jsonlPath, watch.startMessageCount);
+      const hasFileWork = work.filesEdited.length > 0;
+      // Only fetch git diff if there were file edits (avoids noise for simple Q&A)
+      const gitDiff = hasFileWork ? await getGitDiffStat(session.projectPath) : "";
+
+      const message = formatActiveWatchResult(
+        sessionId, tmuxSession, snapshot, newMessages, watch.commandText, lastResponse,
+        hasFileWork ? work : undefined, gitDiff || undefined
+      );
+      await postMessage(watch.channel, message, undefined);
+      watch.posted = true;
+
+      if (isRecording()) {
+        recordPoll(session, jsonlPath, { action: "post", reasons: ["active_watch_result"] }, message, lastResponse);
+        stopRecording(sessionId);
+      }
+
+      // Update background watcher state so it doesn't re-post
+      const state = lastSeen.get(sessionId);
+      if (state) {
+        state.messageCountAtLastPost = session.messageCount;
+        state.messageCount = session.messageCount;
+        state.lastTimestamp = session.lastMessageTimestamp;
+      }
+    } catch (err) {
+      console.error(`[watcher] Active watch post failed for ${sessionId}:`, err);
+      if (isRecording()) {
+        stopRecording(sessionId);
+      }
+    }
+  }
 
   const intervalId = setInterval(async () => {
     try {
@@ -210,40 +335,74 @@ export function startActiveWatch(
       }
 
       const settled = watch.stablePolls >= 2;
-      const expired = elapsed >= timeoutMs;
+      const agentBusy = current.status === "executing" || current.status === "thinking";
+      const hardExpired = elapsed >= hardTimeoutMs;
+      const softExpired = elapsed >= baseTimeoutMs;
 
-      if ((settled || expired) && current.messageCount > watch.startMessageCount) {
-        const jsonlPath = findJsonlForSession(config.claude.sessionDirs, current);
-        if (jsonlPath) {
-          try {
-            const snapshot = await summarizeSession(current, jsonlPath, true);
-            const newMessages = current.messageCount - watch.startMessageCount;
-            const message = formatActiveWatchResult(
-              sessionId, tmuxSession, snapshot, newMessages, watch.commandText
-            );
-            await postMessage(watch.channel, message, undefined);
-          } catch (err) {
-            console.error(`[watcher] Active watch post failed for ${sessionId}:`, err);
-          }
+      // Post when: agent is done (idle/waiting) and has new messages
+      // Don't post while agent is still busy, even if message count briefly stabilized
+      const hasNewMessages = current.messageCount > watch.startMessageCount;
+      const agentDone = !agentBusy && hasNewMessages;
+      const shouldPost = agentDone && (settled || softExpired);
 
-          // Update background watcher state so it doesn't re-post
-          const state = lastSeen.get(sessionId);
-          if (state) {
-            state.messageCountAtLastPost = current.messageCount;
-            state.messageCount = current.messageCount;
-            state.lastTimestamp = current.lastMessageTimestamp;
-          }
-        }
+      // Record poll state for active watches
+      const recSkipReasons = () => [
+        agentBusy && `agent_busy(${current.status})`,
+        !hasNewMessages && "no_new_messages",
+        !settled && !softExpired && "not_settled_or_expired",
+        `elapsed=${elapsed}ms`,
+        `msgs=${current.messageCount}(start=${watch.startMessageCount})`,
+        `stablePolls=${watch.stablePolls}`,
+      ].filter(Boolean) as string[];
 
+      if (shouldPost) {
+        await postResult();
         clearInterval(intervalId);
         activeWatches.delete(sessionId);
         return;
       }
 
-      if (expired) {
+      // Keep watching if agent is still busy (up to hard timeout)
+      if (softExpired && agentBusy && !hardExpired) {
+        if (isRecording()) {
+          const jsonlPath = findJsonlForSession(config.claude.sessionDirs, current);
+          recordPoll(current, jsonlPath, { action: "skip", reasons: [...recSkipReasons(), "extending_for_busy_agent"] });
+        }
+        return;
+      }
+
+      // Hard timeout — post whatever we have
+      if (hardExpired) {
+        if (hasNewMessages) {
+          await postResult();
+        } else if (isRecording()) {
+          const jsonlPath = findJsonlForSession(config.claude.sessionDirs, current);
+          recordPoll(current, jsonlPath, { action: "skip", reasons: ["hard_timeout_no_new_messages"] });
+          stopRecording(sessionId);
+        }
         clearInterval(intervalId);
         activeWatches.delete(sessionId);
         return;
+      }
+
+      // Soft timeout with no activity and agent not busy — done
+      if (softExpired && !agentBusy) {
+        if (hasNewMessages) {
+          await postResult();
+        } else if (isRecording()) {
+          const jsonlPath = findJsonlForSession(config.claude.sessionDirs, current);
+          recordPoll(current, jsonlPath, { action: "skip", reasons: ["soft_timeout_no_new_messages"] });
+          stopRecording(sessionId);
+        }
+        clearInterval(intervalId);
+        activeWatches.delete(sessionId);
+        return;
+      }
+
+      // Still waiting — record the skip
+      if (isRecording()) {
+        const jsonlPath = findJsonlForSession(config.claude.sessionDirs, current);
+        recordPoll(current, jsonlPath, { action: "skip", reasons: recSkipReasons() });
       }
     } catch (err) {
       console.error(`[watcher] Active watch error for ${sessionId}:`, err);
@@ -253,4 +412,9 @@ export function startActiveWatch(
   watch.intervalId = intervalId;
   activeWatches.set(sessionId, watch);
   console.log(`[watcher] Active watch started for ${sessionId} (${tmuxSession})`);
+
+  if (isRecording()) {
+    startRecording(session, "active", commandText);
+    recordPoll(session, session.jsonlPath, { action: "first_seen", reasons: ["active_watch_start"] });
+  }
 }

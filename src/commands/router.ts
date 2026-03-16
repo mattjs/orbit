@@ -27,7 +27,9 @@ import {
   sendToTmux,
 } from "../actions/tmux.js";
 import { appendAudit, getRecentAudit } from "../actions/audit.js";
+import { getSetting, setSetting, deleteSetting } from "../db.js";
 import { startActiveWatch } from "../monitors/watcher.js";
+import { setRecordingEnabled, isRecording, listRecordings, getActiveRecordings } from "../monitors/recorder.js";
 import Anthropic from "@anthropic-ai/sdk";
 
 let nlClient: Anthropic | null = null;
@@ -152,9 +154,26 @@ function textMessage(t: string): Message {
   return { parts: [{ kind: "text", text: t }] };
 }
 
-export function createRouter(config: Config, postMessage: PostMessage) {
-  let focusedSession: { tmuxSession: string; agentId: string | null } | null = null;
+interface FocusedSession {
+  tmuxSession: string;
+  agentId: string | null;
+}
 
+function getFocus(): FocusedSession | null {
+  const raw = getSetting("focused_session");
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+function setFocus(focus: FocusedSession): void {
+  setSetting("focused_session", JSON.stringify(focus));
+}
+
+function clearFocus(): void {
+  deleteSetting("focused_session");
+}
+
+export function createRouter(config: Config, postMessage: PostMessage) {
   async function handleCommand(
     text: string,
     channel: string,
@@ -170,8 +189,9 @@ export function createRouter(config: Config, postMessage: PostMessage) {
     if (command === "help") return handleHelp();
 
     // When focused, send everything else directly to the focused session
-    if (focusedSession) {
-      return executeSend(focusedSession.tmuxSession, text, "focus_send", channel, userId);
+    const focus = getFocus();
+    if (focus) {
+      return executeSend(focus.tmuxSession, text, "focus_send", channel, userId);
     }
 
     switch (command) {
@@ -201,6 +221,10 @@ export function createRouter(config: Config, postMessage: PostMessage) {
         return handleAnswer(arg, channel, userId);
       case "audit":
         return handleAudit();
+      case "record":
+        return handleRecord(arg);
+      case "recordings":
+        return handleRecordings();
       default: {
         // If exactly one agent is waiting, short input goes directly to it
         const autoRouted = tryAutoAnswer(text, channel, userId);
@@ -492,7 +516,7 @@ export function createRouter(config: Config, postMessage: PostMessage) {
     userId?: string
   ): Promise<CommandResult> {
     try {
-      // Capture before sending so we can diff
+      // Capture before state
       let before = "";
       try {
         before = captureTmuxPane(sessionName);
@@ -502,9 +526,12 @@ export function createRouter(config: Config, postMessage: PostMessage) {
 
       sendToTmux(sessionName, text, true);
 
-      // Poll until output stabilizes
-      const timeout = config.actions?.captureDelayMs ?? 3000;
-      const captured = await waitForStableOutput(sessionName, before, timeout);
+      // Brief capture for immediate feedback (skip for auto_answer which is rapid yes/no)
+      let captured = "";
+      if (action !== "auto_answer") {
+        const timeout = config.actions?.captureDelayMs ?? 3000;
+        captured = await waitForStableOutput(sessionName, before, timeout);
+      }
 
       appendAudit({
         timestamp: new Date().toISOString(),
@@ -554,11 +581,12 @@ export function createRouter(config: Config, postMessage: PostMessage) {
 
   function handleFocus(arg: string): CommandResult {
     if (!arg) {
-      if (focusedSession) {
-        const agentStr = focusedSession.agentId ? ` (agent \`${focusedSession.agentId}\`)` : "";
+      const current = getFocus();
+      if (current) {
+        const agentStr = current.agentId ? ` (agent \`${current.agentId}\`)` : "";
         return {
-          message: textMessage(`Currently focused on \`${focusedSession.tmuxSession}\`${agentStr}`),
-          text: `Focused on ${focusedSession.tmuxSession}`,
+          message: textMessage(`Currently focused on \`${current.tmuxSession}\`${agentStr}`),
+          text: `Focused on ${current.tmuxSession}`,
         };
       }
       return {
@@ -572,24 +600,27 @@ export function createRouter(config: Config, postMessage: PostMessage) {
     const byTmux = sessions.find((s) => s.tmuxSession.toLowerCase() === arg.toLowerCase());
     const byId = sessions.find((s) => s.id.startsWith(arg.toLowerCase()));
 
+    let newFocus: FocusedSession;
     if (byTmux) {
-      focusedSession = { tmuxSession: byTmux.tmuxSession, agentId: byTmux.id };
+      newFocus = { tmuxSession: byTmux.tmuxSession, agentId: byTmux.id };
     } else if (byId) {
-      focusedSession = { tmuxSession: byId.tmuxSession, agentId: byId.id };
+      newFocus = { tmuxSession: byId.tmuxSession, agentId: byId.id };
     } else {
       // Could be a plain tmux session without a Claude agent
-      focusedSession = { tmuxSession: arg, agentId: null };
+      newFocus = { tmuxSession: arg, agentId: null };
     }
 
-    const agentStr = focusedSession.agentId ? ` (agent \`${focusedSession.agentId}\`)` : "";
+    setFocus(newFocus);
+
+    const agentStr = newFocus.agentId ? ` (agent \`${newFocus.agentId}\`)` : "";
     return {
-      message: textMessage(`Focused on \`${focusedSession.tmuxSession}\`${agentStr}. All unrecognized input will be sent to this session.`),
-      text: `Focused on ${focusedSession.tmuxSession}`,
+      message: textMessage(`Focused on \`${newFocus.tmuxSession}\`${agentStr}. All unrecognized input will be sent to this session.`),
+      text: `Focused on ${newFocus.tmuxSession}`,
     };
   }
 
   function handleUnfocus(): CommandResult {
-    focusedSession = null;
+    clearFocus();
     return {
       message: textMessage("Focus cleared."),
       text: "Focus cleared",
@@ -723,6 +754,57 @@ IMPORTANT: "what's going on in X?" or "what's X doing?" should be answered direc
     }
   }
 
+  function handleRecord(arg: string): CommandResult {
+    const sub = arg.trim().toLowerCase();
+    if (sub === "on" || sub === "start") {
+      setRecordingEnabled(true);
+      return {
+        message: textMessage("Recording **enabled**. Watcher polls will be captured to `~/.orbit/recordings/`."),
+        text: "Recording enabled",
+      };
+    }
+    if (sub === "off" || sub === "stop") {
+      setRecordingEnabled(false);
+      return {
+        message: textMessage("Recording **disabled**."),
+        text: "Recording disabled",
+      };
+    }
+    if (sub === "status" || !sub) {
+      const on = isRecording();
+      const active = getActiveRecordings();
+      let msg = `Recording: **${on ? "enabled" : "disabled"}**`;
+      if (active.length > 0) {
+        msg += `\nActive recordings: ${active.map(id => `\`${id}\``).join(", ")}`;
+      }
+      return { message: textMessage(msg), text: `Recording ${on ? "on" : "off"}` };
+    }
+    return {
+      message: textMessage("Usage: `record on|off|status`"),
+      text: "Record usage",
+    };
+  }
+
+  function handleRecordings(): CommandResult {
+    const recs = listRecordings();
+    if (recs.length === 0) {
+      return {
+        message: textMessage("No recordings found. Use `record on` to start recording."),
+        text: "No recordings",
+      };
+    }
+    const lines = recs.slice(0, 20).map(r => {
+      const duration = r.finishedAt
+        ? `${Math.round((new Date(r.finishedAt).getTime() - new Date(r.startedAt).getTime()) / 1000)}s`
+        : "in progress";
+      return `\`${r.sessionId}\` (${r.tmuxSession}) — ${r.watchType} — ${r.pollCount} polls — ${duration} — ${r.startedAt}`;
+    });
+    return {
+      message: textMessage(`**Recordings (${recs.length}):**\n${lines.join("\n")}`),
+      text: `${recs.length} recordings`,
+    };
+  }
+
   function handleHelp(): CommandResult {
     const helpText = [
       "**Orbit Commands:**",
@@ -747,6 +829,11 @@ IMPORTANT: "what's going on in X?" or "what's X doing?" should be answered direc
       "`orbit audit` — Show recent action audit log",
       "`orbit focus <session>` — Focus a session (all input sent directly to it)",
       "`orbit unfocus` — Clear focused session",
+      "",
+      "",
+      "**Debugging:**",
+      "`orbit record on|off|status` — Toggle watcher poll recording",
+      "`orbit recordings` — List recorded sessions",
       "",
       "`orbit help` — Show this help",
       "",

@@ -38,7 +38,7 @@ function AgentCard({ agent, projectMap }: { agent: AgentRecord; projectMap: Map<
           {agent.lastSummary}
         </p>
       )}
-      <div className="flex items-center gap-4 text-xs text-gray-500">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
         <span>Last seen: {timeAgo(agent.lastSeen)}</span>
         <span>{agent.totalSnapshots} snapshots</span>
         {agent.projectPath && (

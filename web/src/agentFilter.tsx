@@ -1,35 +1,35 @@
 import { createContext, useContext, useState, useEffect } from "react";
 import type { ReactNode } from "react";
 import { api } from "./api";
-import type { AgentRecord } from "./types";
+import type { ProjectSummary } from "./types";
 
-interface AgentFilterCtx {
-  agents: AgentRecord[];
-  selectedAgent: string | null;
-  setSelectedAgent: (id: string | null) => void;
+interface ProjectFilterCtx {
+  projects: ProjectSummary[];
+  selectedProjectPath: string | null;
+  setSelectedProjectPath: (path: string | null) => void;
 }
 
-const Ctx = createContext<AgentFilterCtx>({
-  agents: [],
-  selectedAgent: null,
-  setSelectedAgent: () => {},
+const Ctx = createContext<ProjectFilterCtx>({
+  projects: [],
+  selectedProjectPath: null,
+  setSelectedProjectPath: () => {},
 });
 
-export function AgentFilterProvider({ children }: { children: ReactNode }) {
-  const [agents, setAgents] = useState<AgentRecord[]>([]);
-  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+export function ProjectFilterProvider({ children }: { children: ReactNode }) {
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [selectedProjectPath, setSelectedProjectPath] = useState<string | null>(null);
 
   useEffect(() => {
-    api.getAgents().then(setAgents);
+    api.getProjects().then(setProjects);
   }, []);
 
   return (
-    <Ctx.Provider value={{ agents, selectedAgent, setSelectedAgent }}>
+    <Ctx.Provider value={{ projects, selectedProjectPath, setSelectedProjectPath }}>
       {children}
     </Ctx.Provider>
   );
 }
 
-export function useAgentFilter() {
+export function useProjectFilter() {
   return useContext(Ctx);
 }

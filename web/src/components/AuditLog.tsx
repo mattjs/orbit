@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { useAgentFilter } from "../agentFilter";
+import { useProjectFilter } from "../agentFilter";
 import type { AuditEntry, PaginatedResponse } from "../types";
 import { Pagination } from "./Pagination";
 
@@ -12,12 +12,12 @@ function formatTime(iso: string): string {
 }
 
 export function AuditLog() {
-  const { selectedAgent, agents } = useAgentFilter();
+  const { selectedProjectPath } = useProjectFilter();
   const [data, setData] = useState<PaginatedResponse<AuditEntry>>({ data: [], total: 0 });
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => { setOffset(0); }, [selectedAgent]);
+  useEffect(() => { setOffset(0); }, [selectedProjectPath]);
 
   useEffect(() => {
     setLoading(true);
@@ -25,16 +25,14 @@ export function AuditLog() {
       limit: String(LIMIT),
       offset: String(offset),
     };
-    if (selectedAgent) {
-      // Audit entries use tmux session name as target, not session ID
-      const agent = agents.find((a) => a.sessionId === selectedAgent);
-      params.target = agent?.tmuxSession ?? selectedAgent;
+    if (selectedProjectPath) {
+      params.projectPath = selectedProjectPath;
     }
     api
       .getAudit(params)
       .then(setData)
       .finally(() => setLoading(false));
-  }, [offset, selectedAgent, agents]);
+  }, [offset, selectedProjectPath]);
 
   return (
     <div>

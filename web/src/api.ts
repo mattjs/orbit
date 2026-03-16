@@ -95,6 +95,41 @@ export const api = {
     if (!res.ok) throw new Error(`API error: ${res.status}`);
     return res.json();
   },
+  getChatHistory: (limit?: number, projectPath?: string) => {
+    const params = new URLSearchParams();
+    if (limit) params.set("limit", String(limit));
+    if (projectPath) params.set("project", projectPath);
+    const qs = params.toString();
+    return fetchJson<import("./types").ChatMessageRecord[]>(`/chat/history${qs ? `?${qs}` : ""}`);
+  },
+  getChatFocus: () => fetchJson<{ focused: boolean; tmuxSession?: string; agentId?: string | null }>("/chat/focus"),
+  sendChat: async (text: string) => {
+    const res = await fetch(`${BASE}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) throw new Error(`API error: ${res.status}`);
+    return res.json() as Promise<{ message: import("./types").Message; text: string }>;
+  },
+  answerQuestion: async (sessionId: string, tmuxSession: string, answer: string) => {
+    const res = await fetch(`${BASE}/chat/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, tmuxSession, answer }),
+    });
+    if (!res.ok) throw new Error(`API error: ${res.status}`);
+    return res.json() as Promise<{ ok: boolean }>;
+  },
+  confirmAction: async (actionId: string, confirmed: boolean) => {
+    const res = await fetch(`${BASE}/chat/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actionId, confirmed }),
+    });
+    if (!res.ok) throw new Error(`API error: ${res.status}`);
+    return res.json() as Promise<{ ok: boolean }>;
+  },
   launchClaude: async (sessionName: string, projectPath: string, prompt?: string) => {
     const res = await fetch(`${BASE}/tmux/launch`, {
       method: "POST",

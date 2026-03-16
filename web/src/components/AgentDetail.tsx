@@ -93,13 +93,13 @@ export function AgentDetail() {
         {agent.lastSummary && (
           <p className="text-gray-400 mb-3">{agent.lastSummary}</p>
         )}
-        <div className="grid grid-cols-2 gap-2 text-sm text-gray-500">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-gray-500">
           <div>First seen: {formatTime(agent.firstSeen)}</div>
           <div>Last seen: {formatTime(agent.lastSeen)}</div>
           {agent.projectPath && (() => {
             const project = projects.find((p) => p.path === agent.projectPath);
             return (
-              <div className="col-span-2">
+              <div className="sm:col-span-2">
                 Project:{" "}
                 {project ? (
                   <Link to={`/projects/${project.id}`} className="text-blue-400 hover:text-blue-300">
@@ -128,7 +128,7 @@ export function AgentDetail() {
               key={i}
               className="bg-gray-900 border border-gray-800 rounded p-3"
             >
-              <div className="flex items-center justify-between mb-1">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
                 <span className="text-xs text-gray-500">
                   {formatTime(snap.timestamp)}
                 </span>

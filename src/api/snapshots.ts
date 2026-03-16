@@ -6,6 +6,7 @@ export function snapshotRoutes(): Hono {
 
   app.get("/snapshots", (c) => {
     const sessionId = c.req.query("sessionId");
+    const projectPath = c.req.query("projectPath");
     const status = c.req.query("status");
     const since = c.req.query("since");
     const until = c.req.query("until");
@@ -14,6 +15,7 @@ export function snapshotRoutes(): Hono {
 
     const result = getSnapshotsPaginated({
       sessionId: sessionId || undefined,
+      projectPath: projectPath || undefined,
       status: status || undefined,
       since: since || undefined,
       until: until || undefined,

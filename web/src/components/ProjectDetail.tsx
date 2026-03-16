@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router";
 import { api } from "../api";
 import { agentName } from "../agentName";
-import type { ProjectDetail as ProjectDetailType, ProjectSession, GitRepoStatus } from "../types";
+import type { AgentRecord, ProjectDetail as ProjectDetailType, GitRepoStatus } from "../types";
 import { StatusBadge } from "./StatusBadge";
 import { TmuxManager } from "./TmuxManager";
 import { LaunchDialog } from "./LaunchDialog";
@@ -10,12 +10,6 @@ import { ConfirmDialog } from "./ConfirmDialog";
 
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleString();
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function EditableField({ label, value, onSave, placeholder, mono }: {
@@ -89,7 +83,6 @@ export function ProjectDetail() {
 
   const { project } = data;
   const liveCount = data.agents.filter((a) => a.live).length;
-  const trackedIds = new Set(data.agents.map((a) => a.sessionId));
 
   const handleUpdateField = async (field: "name" | "path", value: string) => {
     try {
@@ -142,46 +135,46 @@ export function ProjectDetail() {
 
       {/* Project header — editable fields */}
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-5 mb-6">
-        <div className="flex items-start justify-between mb-3">
-          <div className="space-y-2 flex-1">
-            <EditableField
-              label="Name"
-              value={project.name}
-              onSave={(v) => handleUpdateField("name", v)}
-              placeholder="Project name"
-            />
-            <EditableField
-              label="Path"
-              value={project.path}
-              onSave={(v) => handleUpdateField("path", v)}
-              placeholder="/root/my-project"
-              mono
-            />
+        <div className="space-y-2 mb-3">
+          <EditableField
+            label="Name"
+            value={project.name}
+            onSave={(v) => handleUpdateField("name", v)}
+            placeholder="Project name"
+          />
+          <EditableField
+            label="Path"
+            value={project.path}
+            onSave={(v) => handleUpdateField("path", v)}
+            placeholder="/root/my-project"
+            mono
+          />
 
-            {/* tmux Sessions — chip list */}
-            <div className="px-2 py-1 -mx-2">
-              <span className="text-xs text-gray-500 block mb-1">tmux Sessions</span>
-              <div className="flex flex-wrap gap-2 items-center">
-                {project.tmuxSessions.map((s) => (
-                  <span key={s} className="inline-flex items-center gap-1 px-2 py-0.5 bg-gray-800 border border-gray-700 rounded font-mono text-sm text-gray-200">
-                    {s}
-                    <button
-                      onClick={() => removeTmuxSession(s)}
-                      className="text-gray-500 hover:text-red-400 ml-0.5"
-                      title="Remove"
-                    >
-                      x
-                    </button>
-                  </span>
-                ))}
-                {project.tmuxSessions.length === 0 && (
-                  <span className="text-sm text-gray-600 italic">None attached</span>
-                )}
-                <AddSessionInput onAdd={addTmuxSession} />
-              </div>
+          {/* tmux Sessions — chip list */}
+          <div className="px-2 py-1 -mx-2">
+            <span className="text-xs text-gray-500 block mb-1">tmux Sessions</span>
+            <div className="flex flex-wrap gap-2 items-center">
+              {project.tmuxSessions.map((s) => (
+                <span key={s} className="inline-flex items-center gap-1 px-2 py-0.5 bg-gray-800 border border-gray-700 rounded font-mono text-sm text-gray-200">
+                  {s}
+                  <button
+                    onClick={() => removeTmuxSession(s)}
+                    className="text-gray-500 hover:text-red-400 ml-0.5"
+                    title="Remove"
+                  >
+                    x
+                  </button>
+                </span>
+              ))}
+              {project.tmuxSessions.length === 0 && (
+                <span className="text-sm text-gray-600 italic">None attached</span>
+              )}
+              <AddSessionInput onAdd={addTmuxSession} />
             </div>
           </div>
-          <div className="flex items-center gap-2 ml-4 shrink-0">
+
+          {/* Action buttons */}
+          <div className="flex flex-wrap items-center gap-2 pt-1">
             {liveCount > 0 && (
               <span className="text-sm text-green-400">{liveCount} live</span>
             )}
@@ -232,75 +225,16 @@ export function ProjectDetail() {
         {data.agents.length === 0 ? (
           <p className="text-gray-500 text-sm">No tracked agents for this project.</p>
         ) : (
-          <div className="grid gap-2">
-            {data.agents.map((agent) => (
-              <Link
-                key={agent.sessionId}
-                to={`/agents/${encodeURIComponent(agent.sessionId)}`}
-                className="block bg-gray-900 border border-gray-800 rounded p-3 hover:border-gray-600 transition-colors"
-              >
-                <div className="flex items-center justify-between mb-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm text-gray-300 font-medium">{agentName(agent)}</span>
-                    {agent.live && (
-                      <span className="inline-block w-2 h-2 rounded-full bg-green-500" title="Live" />
-                    )}
-                  </div>
-                  <StatusBadge status={agent.lastStatus} />
-                </div>
-                {agent.lastSummary && (
-                  <p className="text-xs text-gray-400 line-clamp-1">{agent.lastSummary}</p>
-                )}
-                <div className="text-xs text-gray-500 mt-1">
-                  {agent.totalSnapshots} snapshots &middot; Last seen {formatTime(agent.lastSeen)}
-                </div>
-              </Link>
-            ))}
-          </div>
+          <AgentSessionList agents={data.agents} />
         )}
       </section>
 
-      {/* Session Files */}
-      <section className="mb-8">
-        <h3 className="text-md font-semibold mb-3">Session Files</h3>
-        {data.jsonlSessions.length === 0 ? (
-          <p className="text-gray-500 text-sm">No JSONL session files found on disk.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-gray-500 border-b border-gray-800">
-                  <th className="pb-2 pr-4">Session ID</th>
-                  <th className="pb-2 pr-4">Modified</th>
-                  <th className="pb-2 pr-4">Size</th>
-                  <th className="pb-2">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.jsonlSessions.map((session: ProjectSession) => (
-                  <tr key={session.jsonlPath} className="border-b border-gray-800/50">
-                    <td className="py-2 pr-4 font-mono text-gray-300">{session.sessionId}</td>
-                    <td className="py-2 pr-4 text-gray-400">{formatTime(session.mtime)}</td>
-                    <td className="py-2 pr-4 text-gray-400">{formatSize(session.sizeBytes)}</td>
-                    <td className="py-2">
-                      {trackedIds.has(session.sessionId) ? (
-                        <span className="text-xs text-blue-400">tracked</span>
-                      ) : (
-                        <span className="text-xs text-gray-600">untracked</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
+
 
       {/* tmux Management */}
       <section className="mb-8">
         <h3 className="text-md font-semibold mb-3">tmux Sessions</h3>
-        <TmuxManager filterProject={project.path} />
+        <TmuxManager filterProject={project.path} filterSessionNames={project.tmuxSessions} />
       </section>
 
       {showLaunch && (
@@ -337,7 +271,7 @@ function GitStatusCard({ git, gitUrl }: { git: GitRepoStatus; gitUrl: string | n
       <h3 className="text-md font-semibold mb-3">Git</h3>
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
         {/* Branch + sync status */}
-        <div className="flex items-center gap-3 mb-3">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3 mb-3">
           <span className="font-mono text-sm text-gray-200 bg-gray-800 px-2 py-0.5 rounded">{git.branch}</span>
           {isClean ? (
             <span className="text-xs text-green-400">clean</span>
@@ -375,18 +309,93 @@ function GitStatusCard({ git, gitUrl }: { git: GitRepoStatus; gitUrl: string | n
 
         {/* Recent commits */}
         {git.recentCommits.length > 0 && (
-          <div className="space-y-1">
+          <div className="space-y-1.5">
             {git.recentCommits.slice(0, 5).map((c) => (
-              <div key={c.hash} className="flex items-baseline gap-2 text-xs">
-                <span className="font-mono text-gray-500 shrink-0">{c.hash}</span>
-                <span className="text-gray-300 truncate">{c.message}</span>
-                <span className="text-gray-600 shrink-0">{c.author}</span>
+              <div key={c.hash} className="text-xs">
+                <div className="flex items-baseline gap-2">
+                  <span className="font-mono text-gray-500 shrink-0">{c.hash}</span>
+                  <span className="text-gray-600 shrink-0">{c.author}</span>
+                </div>
+                <p className="text-gray-300 truncate">{c.message}</p>
               </div>
             ))}
           </div>
         )}
       </div>
     </section>
+  );
+}
+
+function AgentSessionList({ agents }: { agents: AgentRecord[] }) {
+  const [showStale, setShowStale] = useState(false);
+
+  // Group by tmux session
+  const groups = new Map<string, AgentRecord[]>();
+  for (const a of agents) {
+    const key = a.tmuxSession ?? "_ungrouped";
+    const list = groups.get(key) || [];
+    list.push(a);
+    groups.set(key, list);
+  }
+
+  const primary: AgentRecord[] = [];
+  const stale: AgentRecord[] = [];
+
+  for (const [, group] of groups) {
+    const sorted = [...group].sort((a, b) => {
+      if (a.live !== b.live) return a.live ? -1 : 1;
+      return new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime();
+    });
+    primary.push(sorted[0]);
+    stale.push(...sorted.slice(1));
+  }
+
+  const renderCard = (agent: AgentRecord, dim?: boolean) => (
+    <Link
+      key={agent.sessionId}
+      to={`/agents/${encodeURIComponent(agent.sessionId)}`}
+      className={`block rounded p-3 hover:border-gray-600 transition-colors ${
+        dim
+          ? "bg-gray-900/50 border border-gray-800/50"
+          : "bg-gray-900 border border-gray-800"
+      }`}
+    >
+      <div className="flex items-center justify-between mb-1">
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-gray-300 font-medium">{agentName(agent)}</span>
+          {agent.tmuxSession && (
+            <span className="text-xs bg-gray-800 text-gray-500 px-1.5 py-0.5 rounded font-mono">{agent.tmuxSession}</span>
+          )}
+          {agent.live && (
+            <span className="inline-block w-2 h-2 rounded-full bg-green-500" title="Live" />
+          )}
+        </div>
+        <StatusBadge status={agent.lastStatus} />
+      </div>
+      {agent.lastSummary && (
+        <p className="text-xs text-gray-400 line-clamp-1">{agent.lastSummary}</p>
+      )}
+      <div className="text-xs text-gray-500 mt-1">
+        {agent.totalSnapshots} snapshots &middot; Last seen {formatTime(agent.lastSeen)}
+      </div>
+    </Link>
+  );
+
+  return (
+    <div className="grid gap-2">
+      {primary.map((a) => renderCard(a))}
+      {stale.length > 0 && (
+        <>
+          <button
+            onClick={() => setShowStale(!showStale)}
+            className="text-xs text-gray-500 hover:text-gray-400 text-left px-1 py-1"
+          >
+            {showStale ? "Hide" : "Show"} {stale.length} older session{stale.length !== 1 ? "s" : ""}
+          </button>
+          {showStale && stale.map((a) => renderCard(a, true))}
+        </>
+      )}
+    </div>
   );
 }
 

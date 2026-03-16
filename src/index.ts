@@ -1,5 +1,6 @@
 import { loadConfig } from "./config.js";
 import { SlackAdapter } from "./adapters/slack.js";
+import { CliAdapter } from "./adapters/cli.js";
 import { createRouter, pendingActions, waitForStableOutput } from "./commands/router.js";
 import { startScheduler } from "./scheduler.js";
 import { startAgentWatcher, startActiveWatch } from "./monitors/watcher.js";
@@ -9,10 +10,13 @@ import { serve } from "@hono/node-server";
 import { sendToTmux, captureTmuxPane } from "./actions/tmux.js";
 import { appendAudit } from "./actions/audit.js";
 import { formatTmuxCapture } from "./formatters.js";
+import { pushChatMessage } from "./api/chat.js";
+import type { MessagingAdapter } from "./adapter.js";
 import type { Message } from "./messages.js";
 
 async function main() {
-  const configPath = process.argv[2];
+  const cliMode = process.argv.includes("--cli");
+  const configPath = process.argv.find((a) => !a.startsWith("-") && a !== process.argv[0] && a !== process.argv[1]);
 
   console.log("Loading config...");
   const config = loadConfig(configPath);
@@ -21,12 +25,19 @@ async function main() {
   getDb();
   migrateFromJsonl();
 
-  console.log("Starting Orbit bot...");
-  const adapter = new SlackAdapter(config);
+  const adapter: MessagingAdapter = cliMode
+    ? new CliAdapter()
+    : new SlackAdapter(config);
 
-  // postMessage wrapper for watcher/scheduler
-  const postMessage = (channel: string, message: Message, threadId?: string) =>
-    adapter.send(channel, message, threadId);
+  console.log(`Starting Orbit (${cliMode ? "CLI" : "Slack"} mode)...`);
+
+  // postMessage wrapper for watcher/scheduler — push to all channels
+  const postMessage = (channel: string, message: Message, threadId?: string) => {
+    pushChatMessage(message);
+    // Don't send to Slack when the channel is "web" (web chat origin)
+    if (channel === "web") return Promise.resolve(undefined);
+    return adapter.send(channel, message, threadId);
+  };
 
   const handleCommand = createRouter(config, postMessage);
 
@@ -35,8 +46,10 @@ async function main() {
     return handleCommand(msg.text, msg.channel, msg.userId);
   });
 
-  // Wire question responses — send answer to tmux + audit + active watch
-  adapter.onQuestionResponse(async (sessionId, tmuxSession, answer, userId, channel) => {
+  // Shared handler for question responses — used by both adapter and web API
+  const handleAnswer = async (sessionId: string, tmuxSession: string, answer: string, userId?: string, channel?: string) => {
+    const watchChannel = channel || config.slack.channel;
+
     sendToTmux(tmuxSession, answer, true);
 
     appendAudit({
@@ -49,11 +62,11 @@ async function main() {
       userId,
     });
 
-    startActiveWatch(tmuxSession, channel || config.slack.channel, answer);
-  });
+    startActiveWatch(tmuxSession, watchChannel, answer);
+  };
 
-  // Wire confirm responses — execute or cancel pending send
-  adapter.onConfirmResponse(async (actionId, confirmed, userId, channel) => {
+  // Shared handler for confirm responses — used by both adapter and web API
+  const handleConfirm = async (actionId: string, confirmed: boolean, userId?: string, channel?: string) => {
     const pending = pendingActions.get(actionId);
     if (!pending) return;
 
@@ -89,7 +102,7 @@ async function main() {
       if (captured) {
         msgParts.push(...formatTmuxCapture(pending.session, captured).parts);
       }
-      await adapter.send(watchChannel, { parts: msgParts });
+      await postMessage(watchChannel, { parts: msgParts });
 
       startActiveWatch(pending.session, watchChannel, pending.text);
     } else {
@@ -103,16 +116,20 @@ async function main() {
         userId,
       });
 
-      await adapter.send(watchChannel, {
+      await postMessage(watchChannel, {
         parts: [{ kind: "text", text: `Cancelled send to \`${pending.session}\`.` }],
       });
     }
-  });
+  };
+
+  // Wire adapter handlers to shared logic
+  adapter.onQuestionResponse(handleAnswer);
+  adapter.onConfirmResponse(handleConfirm);
 
   await adapter.start();
 
-  // Start scheduler if configured
-  if (config.scheduler.enabled && config.scheduler.intervalMinutes > 0) {
+  // Start scheduler if configured (skip in CLI mode)
+  if (!cliMode && config.scheduler.enabled && config.scheduler.intervalMinutes > 0) {
     startScheduler(
       config.scheduler.intervalMinutes,
       config.slack.channel,
@@ -124,9 +141,9 @@ async function main() {
   // Start background agent watcher
   startAgentWatcher(config, postMessage);
 
-  // Start web server if configured
-  if (config.web?.enabled) {
-    const api = createApi(config);
+  // Start web server if configured (skip in CLI mode)
+  if (!cliMode && config.web?.enabled) {
+    const api = createApi(config, { handleCommand, handleAnswer, handleConfirm });
     const port = config.web.port ?? 3000;
 
     if (config.web.tls) {
@@ -148,7 +165,11 @@ async function main() {
     }
   }
 
-  console.log(`Orbit is live! Listening in channel ${config.slack.channel}`);
+  if (cliMode) {
+    console.log("Orbit CLI is ready. Type commands or chat naturally.\n");
+  } else {
+    console.log(`Orbit is live! Listening in channel ${config.slack.channel}`);
+  }
 }
 
 main().catch((err) => {

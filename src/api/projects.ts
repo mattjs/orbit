@@ -9,7 +9,7 @@ import {
   getDistinctProjectPaths,
   appendAudit,
 } from "../db.js";
-import { getClaudeSessions, listProjectSessions } from "../monitors/claude.js";
+import { getClaudeSessions } from "../monitors/claude.js";
 import { getGitStatus, cloneRepo } from "../monitors/git.js";
 import type { Config } from "../config.js";
 
@@ -156,9 +156,6 @@ export function projectRoutes(config: Config): Hono {
       ),
     ];
 
-    // List all JSONL session files on disk
-    const jsonlSessions = listProjectSessions(config.claude.sessionDirs, project.path);
-
     // Git status
     let gitStatus = null;
     try {
@@ -178,7 +175,6 @@ export function projectRoutes(config: Config): Hono {
     return c.json({
       project,
       agents: enrichedAgents,
-      jsonlSessions,
       detectedTmuxSessions,
       gitStatus,
     });

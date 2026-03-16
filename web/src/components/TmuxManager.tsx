@@ -5,10 +5,11 @@ import { ConfirmDialog } from "./ConfirmDialog";
 
 interface TmuxManagerProps {
   filterProject?: string;
+  filterSessionNames?: string[];
 }
 
-export function TmuxManager({ filterProject }: TmuxManagerProps) {
-  const [sessions, setSessions] = useState<TmuxSession[]>([]);
+export function TmuxManager({ filterProject, filterSessionNames }: TmuxManagerProps) {
+  const [allSessions, setAllSessions] = useState<TmuxSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [killing, setKilling] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
@@ -17,8 +18,12 @@ export function TmuxManager({ filterProject }: TmuxManagerProps) {
   const [error, setError] = useState<string | null>(null);
 
   const load = () => {
-    api.getTmuxSessions().then(setSessions).finally(() => setLoading(false));
+    api.getTmuxSessions().then(setAllSessions).finally(() => setLoading(false));
   };
+
+  const sessions = filterSessionNames
+    ? allSessions.filter((s) => filterSessionNames.includes(s.name))
+    : allSessions;
 
   useEffect(() => { load(); }, []);
 
@@ -60,8 +65,8 @@ export function TmuxManager({ filterProject }: TmuxManagerProps) {
       ) : (
         <div className="space-y-2 mb-4">
           {sessions.map((s) => (
-            <div key={s.name} className="flex items-center justify-between bg-gray-900 border border-gray-800 rounded p-3">
-              <div className="flex items-center gap-3">
+            <div key={s.name} className="flex flex-wrap items-center justify-between gap-2 bg-gray-900 border border-gray-800 rounded p-3">
+              <div className="flex flex-wrap items-center gap-2 sm:gap-3">
                 <span className="text-sm text-gray-200 font-medium">{s.name}</span>
                 <span className="text-xs text-gray-500">{s.windows} window{s.windows !== 1 ? "s" : ""}</span>
                 {s.attached && (
@@ -79,8 +84,8 @@ export function TmuxManager({ filterProject }: TmuxManagerProps) {
         </div>
       )}
 
-      <form onSubmit={handleCreate} className="flex items-end gap-2">
-        <div className="flex-1">
+      <form onSubmit={handleCreate} className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] items-end gap-2">
+        <div>
           <label className="block text-xs text-gray-500 mb-1">Session name</label>
           <input
             value={newName}
@@ -89,7 +94,7 @@ export function TmuxManager({ filterProject }: TmuxManagerProps) {
             className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200"
           />
         </div>
-        <div className="flex-1">
+        <div>
           <label className="block text-xs text-gray-500 mb-1">Working directory</label>
           <input
             value={newCwd}

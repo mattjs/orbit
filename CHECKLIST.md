@@ -3,9 +3,15 @@
 ## Core Infrastructure
 
 - [x] Slack bot via Bolt SDK (Socket Mode)
+- [x] CLI adapter (readline-based, for local testing)
+- [x] MessagingAdapter interface (decoupled from Slack)
+- [x] Platform-agnostic message types (MessagePart, Message)
 - [x] YAML config loader (`~/.orbit/config.yaml`)
+- [x] SQLite database (WAL mode) — replaced flat JSONL files
 - [x] systemd service unit
-- [x] tsup build pipeline
+- [x] tsup (server) + vite (web) build pipeline
+- [x] TLS support (cert/key in config)
+- [x] Basic auth middleware for API
 
 ## Monitoring
 
@@ -16,7 +22,7 @@
 - [x] Waiting question extraction (AskUserQuestion with options)
 - [x] Git repo status monitoring (branch, ahead/behind, dirty files)
 - [x] AI-powered session summaries via Claude Haiku (incremental, context-preserving)
-- [x] Session snapshot history (`~/.orbit/history.jsonl`)
+- [x] Session snapshot history (SQLite)
 
 ## Background Agent Watcher
 
@@ -25,9 +31,13 @@
 - [x] Status transition detection and posting
 - [x] Waiting question immediate notification
 - [x] First-seen sessions recorded silently (no startup dump)
-- [x] Post-command active watches (5s poll, stabilization detection)
-- [x] Active watch auto-expiry (60s timeout)
+- [x] Post-command active watches (5s poll, timestamp-based scoping)
+- [x] Active watch auto-expiry (soft 15s, hard 120s)
 - [x] Active watches skip background poll (no duplicate posts)
+- [x] Timestamp-based text extraction (`since` parameter on all extraction functions)
+- [x] Work footer filtering (only shown when agent edited files, read-only tools excluded)
+- [x] Tool confirmation injection (Bash/Write/Edit pending → approve/deny buttons)
+- [x] Opt-in poll recording for debugging (`~/.orbit/recordings/`)
 - [ ] Configurable background poll interval (currently hardcoded 30s)
 
 ## Commands
@@ -45,15 +55,18 @@
 - [x] `answer <agent-id> <text>` — answer agent question
 - [x] `focus` / `unfocus` — session focus for NL routing
 - [x] `audit` — action audit log
+- [x] `record on|off|status` — toggle watcher recording
+- [x] `recordings` — list recorded sessions
 - [x] `help` — command reference
 
 ## Actions & Safety
 
-- [x] Dangerous command confirmation via Slack buttons (confirm/cancel)
+- [x] Dangerous command confirmation via buttons (confirm/cancel)
 - [x] Allowlist patterns for auto-approved commands
 - [x] tmux pane capture with diff detection (before/after send)
 - [x] Stable output polling (waitForStableOutput)
 - [x] Audit trail with timestamps, user attribution, input/output
+- [x] Watcher-originated confirm buttons for pending tool calls
 
 ## Natural Language Interface
 
@@ -61,76 +74,62 @@
 - [x] System context injection (agents, status, tmux sessions)
 - [x] Session focus awareness ("say yes" routes to focused session)
 - [x] Direct answers from context vs. command routing
-- [x] Conversation threading (replies respect thread context)
 
-## Slack UX
+## Interactive Prompts
 
-- [x] Block Kit formatted messages (sections, headers, context, dividers)
-- [x] Status emoji indicators (executing/thinking/waiting/idle)
-- [x] Confirm/cancel buttons for dangerous sends
-- [x] Agent summary sections with tool counts, files, tokens
-- [x] Substantial content preservation (long-form agent output)
+- [x] Structured prompt parsing (WaitingPrompt with question + options)
+- [x] Yes/No and multiple choice button rendering
+- [x] Summary context above questions
+- [x] Watcher integration (button click → tmux send → active watch)
+- [x] Button state management (answered buttons show checkmark, disabled)
+- [x] Confirm buttons for pending Bash/Write/Edit tool calls
+- [ ] Free-text fallback for open-ended questions (currently requires `answer` command)
 
-### Interactive Agent Prompts
+## Web Dashboard
 
-When an agent enters the waiting state with an `AskUserQuestion`, post an interactive Slack message with buttons instead of plain text:
+- [x] React 19 + Vite + Tailwind v4 SPA
+- [x] Project list with agent counts, live indicators
+- [x] Project detail — agents, git status, tmux sessions, launch button
+- [x] Agent list and detail views
+- [x] Timeline (session snapshots)
+- [x] Audit log viewer
+- [x] Real-time chat with SSE push
+- [x] Chat history persistence (SQLite, 200 message cap)
+- [x] Interactive question/confirm buttons in chat
+- [x] Notification system (unread badge, amber banner, toasts, browser notifications)
+- [x] Project filter in header (shared across all pages)
+- [x] Focus indicator in header
+- [x] Mobile-responsive layout (sticky top bar, pinned chat input)
+- [x] Touch-action zoom prevention
 
-- [x] **Structured prompt parsing** — `WaitingPrompt` type in `claude.ts` with `question` and `options[]`, carried through `ClaudeSession` → `SessionSnapshot` → watcher/formatters.
-- [x] **Yes/No prompts** — When no explicit options, defaults to yes/no buttons. "Yes" styled primary (green), "No" styled danger (red).
-- [x] **Multiple choice prompts** — Options from `AskUserQuestion` rendered as individual buttons (up to 5). Clicking sends the option text to the agent's tmux session.
-- [x] **Summary context** — Waiting notifications include the AI summary of what the agent was doing above the question, so the user has context when deciding.
-- [x] **Watcher integration** — Clicking any answer button sends to tmux, audits, and triggers `startActiveWatch` for follow-up.
-- [x] **All surfaces** — Buttons appear in background watcher notifications, post-command watch results, `agents` list, and `agent <id>` detail views.
-- [ ] **Free-text fallback** — When no options detected, add a text input action for custom answers (currently defaults to yes/no buttons; free-text requires `answer <id> <text>` command).
-- [ ] **Button state management** — After a button is clicked, update the original message to show which option was selected (disable other buttons or replace with confirmation text).
+## Project Management
 
-### Conversation Threading
+- [x] Projects as first-class DB entities (CRUD)
+- [x] Clone from GitHub URL
+- [x] Create new project (git init + optional GitHub repo creation via `gh`)
+- [x] Add existing directory
+- [x] Discovered paths (agent CWDs not in projects table)
+- [x] Auto-detect tmux sessions running Claude in project path
+- [x] Git URL auto-population from remote
+- [x] Launch agent from project page
 
-- [x] Per-agent thread tracking (`agentThreads` map: agentId → threadTs)
-- [x] Watcher periodic updates threaded under agent's parent message
-- [x] Waiting prompts break out to top-level (needs attention), start new thread
-- [x] Active watch follow-ups posted in the thread of the triggering message (button click) or agent thread
-- [x] User commands in main channel → top-level reply; in a thread → reply in that thread
-- [x] Button click replies (confirm, cancel, answer_prompt) threaded under the button's message
-- [ ] Thread expiry — stale agent threads could accumulate (low priority, Slack handles gracefully)
+## API (Hono)
 
-## Agent Lifecycle Management
-
-Manage Claude Code agents (tmux + `claude` CLI processes) from Slack.
-
-### Start agents
-- [ ] `orbit launch <project-path> [prompt]` — Create a new tmux session, `cd` to the project, run `claude` with an optional initial prompt
-- [ ] Project directory allowlist in config (`lifecycle.allowedProjects`) — prevent launching in arbitrary paths
-- [ ] Configurable default launch command (e.g., `claude`, `claude --resume`, `claude -p "..."`)
-- [ ] Naming: auto-generate tmux session name from project dirname or allow `orbit launch --name <name> <path>`
-
-### Stop agents
-- [ ] `orbit kill <agent-id>` — Send SIGINT to the Claude process, then SIGTERM after timeout
-- [ ] `orbit kill <agent-id> --force` — Immediately SIGKILL + destroy tmux session
-- [ ] Confirmation required (reuse existing confirm button pattern)
-- [ ] Graceful shutdown: try sending `/exit` or Ctrl-C first, escalate to signals
-
-### Restart agents
-- [ ] `orbit restart <agent-id>` — Kill + relaunch in the same tmux session and project directory
-- [ ] Option to resume (`--resume`) or start fresh
-
-### Safety
-- [ ] Config: `lifecycle.enabled: false` (opt-in, disabled by default)
-- [ ] Config: `lifecycle.allowedUsers` — Slack user IDs permitted to start/stop agents
-- [ ] All lifecycle actions audited
-- [ ] Rate limiting — prevent rapid start/stop cycles
-
-### Design questions to resolve
-- Should `launch` accept a full prompt inline, or should you `launch` then `send` the prompt separately?
-- Should there be a max concurrent agents limit?
-- Should `kill` also clean up the tmux session, or leave it for inspection?
+- [x] GET/POST /projects, /projects/clone, /projects/init, /projects/discovered
+- [x] GET/PATCH/DELETE /projects/:id
+- [x] GET /agents, /agents/live, /agents/:id
+- [x] GET /snapshots
+- [x] GET /audit
+- [x] GET/POST/DELETE /tmux, POST /tmux/launch
+- [x] POST /chat, /chat/answer, /chat/confirm
+- [x] GET /chat/events (SSE), /chat/focus, /chat/history
+- [x] GET /recordings, POST /recordings/toggle, GET /recordings/:id/:ts
 
 ## Future Ideas
 
-- [ ] Multi-channel support (different channels for different agents/projects)
-- [ ] Slash commands (`/orbit status`) as alternative to message-based commands
-- [ ] Alert thresholds (notify when CPU > 90%, disk > 80%, etc.)
-- [ ] Session grouping by project
-- [ ] Web dashboard / web app
+- [ ] Multi-channel Slack support (different channels per project)
+- [ ] Alert thresholds (CPU > 90%, disk > 80%)
 - [ ] Rate limiting for LLM summarization calls
-- [ ] Summary diff detection (avoid posting when summary content hasn't meaningfully changed)
+- [ ] Summary diff detection (skip posting when content unchanged)
+- [ ] Agent lifecycle commands in chat (kill, restart)
+- [ ] Configurable watcher poll intervals

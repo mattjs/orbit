@@ -599,8 +599,16 @@ export function formatActiveWatchResult(
   if (work?.filesEdited && work.filesEdited.length > 0) {
     contextLines.push(`**Files changed:** ${work.filesEdited.map(f => `\`${f}\``).join(", ")}`);
   }
-  if (work?.toolCounts && Object.keys(work.toolCounts).length > 0) {
-    contextLines.push(`**Tools:** ${formatToolCounts(work.toolCounts)}`);
+  if (work?.toolCounts) {
+    // Only show write-oriented tools — Read/Grep/Glob are noise
+    const meaningfulTools: Record<string, number> = {};
+    for (const [name, count] of Object.entries(work.toolCounts)) {
+      if (name === "Read" || name === "Grep" || name === "Glob") continue;
+      meaningfulTools[name] = count;
+    }
+    if (Object.keys(meaningfulTools).length > 0) {
+      contextLines.push(`**Tools:** ${formatToolCounts(meaningfulTools)}`);
+    }
   }
   if (gitDiff) {
     contextLines.push(`**Git diff:**`);

@@ -19,6 +19,19 @@ export function Layout() {
     { to: "/audit", label: "Audit Log" },
   ];
 
+  const projectSelector = projects.length > 0 ? (
+    <select
+      value={selectedProjectPath ?? ""}
+      onChange={(e) => setSelectedProjectPath(e.target.value || null)}
+      className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300"
+    >
+      <option value="">All projects</option>
+      {projects.map((p) => (
+        <option key={p.id} value={p.path}>{p.name}</option>
+      ))}
+    </select>
+  ) : null;
+
   return (
     <div className="min-h-screen flex flex-col md:flex-row">
       <ToastContainer />
@@ -45,21 +58,27 @@ export function Layout() {
       )}
 
       {/* Mobile top bar */}
-      <div className="md:hidden sticky top-0 z-30 flex items-center justify-between bg-gray-900 border-b border-gray-800 px-4 py-3">
-        <h1 className="text-lg font-bold">Orbit</h1>
-        <button
-          onClick={() => setMenuOpen(!menuOpen)}
-          className="text-gray-400 hover:text-gray-200 p-1"
-          aria-label="Toggle menu"
-        >
-          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            {menuOpen ? (
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            ) : (
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-            )}
-          </svg>
-        </button>
+      <div className="md:hidden sticky top-0 z-30 bg-gray-900 border-b border-gray-800 px-4 py-3">
+        <div className="flex items-center justify-between">
+          <h1 className="text-lg font-bold">Orbit</h1>
+          <div className="flex items-center gap-2">
+            {projectSelector}
+            <div id="header-controls" className="flex items-center gap-2" />
+            <button
+              onClick={() => setMenuOpen(!menuOpen)}
+              className="text-gray-400 hover:text-gray-200 p-1"
+              aria-label="Toggle menu"
+            >
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                {menuOpen ? (
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                ) : (
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                )}
+              </svg>
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Sidebar — always visible on md+, toggleable on mobile */}
@@ -87,25 +106,11 @@ export function Layout() {
             )}
           </NavLink>
         ))}
-        {projects.length > 0 && (
-          <div className="mt-6 px-3">
-            <label className="block text-xs text-gray-500 mb-1">Filter project</label>
-            <select
-              value={selectedProjectPath ?? ""}
-              onChange={(e) => setSelectedProjectPath(e.target.value || null)}
-              className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-300"
-            >
-              <option value="">All projects</option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.path}>
-                  {p.name}{p.hasLive ? " \u25cf" : ""}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
       </nav>
-      <main className="flex-1 p-4 md:p-6 md:overflow-auto md:h-screen min-w-0">
+      <main className="flex-1 p-4 md:p-6 overflow-auto h-[calc(100dvh-theme(spacing.16))] md:h-dvh min-w-0">
+        <div id="header-controls-desktop" className="hidden md:flex items-center gap-3 mb-3">
+          {projectSelector}
+        </div>
         <Outlet />
       </main>
     </div>

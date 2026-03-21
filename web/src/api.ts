@@ -37,6 +37,18 @@ export const api = {
   getDiscoveredPaths: () => fetchJson<import("./types").DiscoveredPath[]>("/projects/discovered"),
   getProject: (id: number) =>
     fetchJson<import("./types").ProjectDetail>(`/projects/${id}`),
+  initProject: async (data: { name: string; path: string; createGithubRepo?: boolean; githubName?: string; private?: boolean }) => {
+    const res = await fetch(`${BASE}/projects/init`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: `API error: ${res.status}` }));
+      throw new Error(err.error || `API error: ${res.status}`);
+    }
+    return res.json() as Promise<import("./types").ProjectRecord>;
+  },
   cloneProject: async (data: { gitUrl: string; path: string; name?: string }) => {
     const res = await fetch(`${BASE}/projects/clone`, {
       method: "POST",

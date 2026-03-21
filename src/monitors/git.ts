@@ -139,6 +139,40 @@ export async function cloneRepo(url: string, targetPath: string): Promise<void> 
   await git.clone(url, targetPath);
 }
 
+/** Initialize a new git repo at targetPath. Creates the directory if needed. */
+export async function initRepo(targetPath: string): Promise<void> {
+  const { mkdirSync } = await import("fs");
+  mkdirSync(targetPath, { recursive: true });
+  const git = simpleGit(targetPath);
+  await git.init();
+}
+
+/** Create a GitHub repo using `gh` CLI and set it as origin. Returns the repo URL. */
+export async function createGitHubRepo(
+  targetPath: string,
+  repoName: string,
+  isPrivate: boolean
+): Promise<string> {
+  const { execSync } = await import("child_process");
+
+  // Create repo on GitHub
+  const visibility = isPrivate ? "--private" : "--public";
+  const result = execSync(
+    `gh repo create ${JSON.stringify(repoName)} ${visibility} --clone=false`,
+    { encoding: "utf-8", timeout: 30_000 }
+  ).trim();
+
+  // Extract URL from gh output (it prints the URL)
+  const urlMatch = result.match(/(https:\/\/github\.com\/[^\s]+)/);
+  const repoUrl = urlMatch ? urlMatch[1] : `https://github.com/${repoName}`;
+
+  // Add as remote
+  const git = simpleGit(targetPath);
+  await git.addRemote("origin", `${repoUrl}.git`);
+
+  return repoUrl;
+}
+
 export async function getGitRepoStatus(
   repos: string[],
   repoName: string

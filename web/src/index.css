@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+/* Prevent pinch-to-zoom on mobile (iOS ignores viewport meta) */
+html {
+  touch-action: manipulation;
+}
+
 @keyframes slide-in-right {
   from { transform: translateX(100%); opacity: 0; }
   to { transform: translateX(0); opacity: 1; }

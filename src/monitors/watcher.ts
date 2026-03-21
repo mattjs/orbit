@@ -1,5 +1,5 @@
 import type { Config } from "../config.js";
-import type { Message } from "../messages.js";
+import type { Message, MessagePart } from "../messages.js";
 import type { SessionStatus, WaitingPrompt } from "./claude.js";
 import { getClaudeSessions, findJsonlForSession, getLastAssistantText, getLastSubstantiveText, getWorkSummary } from "./claude.js";
 import { captureTmuxPane } from "../actions/tmux.js";
@@ -9,6 +9,7 @@ import {
   formatWatcherUpdate,
   formatActiveWatchResult,
 } from "../formatters.js";
+import { pendingActions } from "../commands/router.js";
 import { isRecording, startRecording, recordPoll, stopRecording } from "./recorder.js";
 import simpleGit from "simple-git";
 
@@ -168,6 +169,26 @@ export function startAgentWatcher(
               ? formatWaitingPrompt(session.id, session.tmuxSession, current.summary, current.waitingPrompt!)
               : formatWatcherUpdate(session.id, session.tmuxSession, current, prev, lastResponse);
 
+            // Add confirm button for pending Write/Edit tool calls
+            const bgPendingTools = session.pendingToolCalls.filter(t => t.status === "pending");
+            if (bgPendingTools.length > 0 && session.status === "executing") {
+              const actionId = `watcher-confirm-${session.id}-${Date.now()}`;
+              const toolNames = bgPendingTools.map(t => t.tool).join(", ");
+              pendingActions.set(actionId, {
+                session: session.tmuxSession,
+                text: "1",
+                channel: config.slack.channel,
+                createdAt: Date.now(),
+              });
+              message.parts.push({ kind: "divider" });
+              message.parts.push({
+                kind: "confirm",
+                actionId,
+                session: session.tmuxSession,
+                description: `Approve ${toolNames} tool call?`,
+              });
+            }
+
             await postMessage(config.slack.channel, message, undefined);
             current.messageCountAtLastPost = current.messageCount;
             console.log(`[watcher] Posted update for ${session.id}`);
@@ -265,13 +286,17 @@ export function startActiveWatch(
       const snapshot = await summarizeSession(session, jsonlPath, true);
       const newMessages = session.messageCount - watch.startMessageCount;
 
-      // Try multiple strategies to get the agent's response text:
-      // 1. Last assistant text (immediate last message)
-      let lastResponse = getLastAssistantText(jsonlPath);
+      // Try multiple strategies to get the agent's response text,
+      // scoped to messages AFTER the watch started (by timestamp)
+      // to avoid showing text from prior interactions.
+      const since = watch.startedAt;
 
-      // 2. Walk back further to find substantive text (skips tool-call-only messages)
+      // 1. Last assistant text since the command was sent
+      let lastResponse = getLastAssistantText(jsonlPath, since);
+
+      // 2. Walk back further within the watch window to find substantive text
       if (!lastResponse) {
-        const substantive = getLastSubstantiveText(jsonlPath);
+        const substantive = getLastSubstantiveText(jsonlPath, 10, since);
         lastResponse = substantive.text;
       }
 
@@ -283,7 +308,7 @@ export function startActiveWatch(
       }
 
       // Get work summary for context — only include if the agent actually did file work
-      const work = getWorkSummary(jsonlPath, watch.startMessageCount);
+      const work = getWorkSummary(jsonlPath, watch.startedAt);
       const hasFileWork = work.filesEdited.length > 0;
       // Only fetch git diff if there were file edits (avoids noise for simple Q&A)
       const gitDiff = hasFileWork ? await getGitDiffStat(session.projectPath) : "";
@@ -292,6 +317,29 @@ export function startActiveWatch(
         sessionId, tmuxSession, snapshot, newMessages, watch.commandText, lastResponse,
         hasFileWork ? work : undefined, gitDiff || undefined
       );
+
+      // If agent has pending tool calls (Write/Edit awaiting confirmation),
+      // add a confirm part so the user can approve/deny from chat
+      const pendingTools = session.pendingToolCalls.filter(t => t.status === "pending");
+      if (pendingTools.length > 0 && session.status === "executing") {
+        const actionId = `watcher-confirm-${sessionId}-${Date.now()}`;
+        const toolNames = pendingTools.map(t => t.tool).join(", ");
+        pendingActions.set(actionId, {
+          session: tmuxSession,
+          text: "1",  // "Yes" option in Claude Code's confirmation prompt
+          channel: watch.channel,
+          createdAt: Date.now(),
+        });
+        const confirmPart: MessagePart = {
+          kind: "confirm",
+          actionId,
+          session: tmuxSession,
+          description: `Approve ${toolNames} tool call?`,
+        };
+        message.parts.push({ kind: "divider" });
+        message.parts.push(confirmPart);
+      }
+
       await postMessage(watch.channel, message, undefined);
       watch.posted = true;
 

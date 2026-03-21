@@ -1,94 +1,34 @@
-# Orbit
+# Orbit — Product Overview
 
-**Remote machine agent, controllable via Slack.**
+A Node.js daemon for monitoring and controlling Claude Code agents on remote machines, with Slack and web interfaces.
 
-Orbit is a Node.js daemon you install on remote machines. It monitors Claude Code agents, system health, and git — and can act on the machine by sending commands to tmux sessions. All from Slack.
+## Core Concepts
 
-## Architecture
+**Adapter abstraction** — Orbit uses a `MessagingAdapter` interface (`adapter.ts`) that decouples message handling from the transport. Slack, CLI, and web chat all share the same command router, formatters, and message types.
 
-```
-src/
-  monitors/          # Read the system (status, agents, git)
-  actions/           # Change the system (tmux send, audit)
-  commands/router.ts # Parse Slack commands, dispatch to handlers
-  slack/bot.ts       # Slack Bolt app, message + action handlers
-  slack/formatters.ts# Block Kit message formatters
-```
+**Message types** — All messages use a platform-agnostic `Message` type (`messages.ts`) with structured parts: text, headers, code blocks, dividers, interactive questions, and confirm buttons. Each adapter renders these appropriately (Block Kit for Slack, React components for web).
 
-## Commands
+**Two-mode watcher** — The background watcher (`watcher.ts`) operates in two modes:
+1. **Background (30s poll)** — Posts when message count delta hits threshold, status changes, or agent starts waiting
+2. **Active watch (5s poll)** — Triggered after sending a command; reports back with the agent's response, scoped by timestamp to avoid stale text
 
-### Monitoring
+**Timestamp-based scoping** — Text extraction functions (`getLastAssistantText`, `getLastSubstantiveText`, `getWorkSummary`) accept a `since` parameter to filter JSONL entries by timestamp, ensuring active watches only report work done after the command was sent.
 
-| Command | Description |
-|---|---|
-| `orbit status` | System health (CPU, memory, disk, uptime) |
-| `orbit agents` | List active Claude Code sessions |
-| `orbit agent <id>` | Detail on a specific agent |
-| `orbit git` | Git status across watched repos |
-| `orbit git <repo>` | Detailed status for a specific repo |
-| `orbit report` | Full combined report |
-| `orbit history` | Recent session snapshots (last 24h) |
-| `orbit history <id>` | History for a specific session |
-| `orbit watch <minutes>` | Start periodic reporting |
-| `orbit stop` | Stop periodic reporting |
+**Tool confirmation** — When the watcher detects pending tool calls (Bash, Write, Edit waiting for user approval), it injects confirm buttons into the posted message. Approving sends "1" (Yes) to the tmux session; canceling sends "3" (No).
 
-### Actions (Phase 1 — tmux)
+## Security
 
-| Command | Description | Confirmation? |
-|---|---|---|
-| `orbit sessions` | List all tmux sessions | No |
-| `orbit capture <session>` | Show visible pane content | No |
-| `orbit send <session> <text>` | Send keystrokes to session | If text doesn't match allowedCommands |
-| `orbit answer <agent-id> <text>` | Answer a Claude agent's question | No |
-| `orbit audit` | Show recent action audit log | No |
+- **Basic auth** on all API endpoints (configurable username/password)
+- **TLS** support (cert/key in config)
+- **Channel-based auth** for Slack (only messages in configured channels)
+- **Command allowlist** — glob patterns for auto-approved tmux sends
+- **Confirmation buttons** for non-allowlisted sends
+- **Audit log** — all actions logged to SQLite with user, timestamp, and result
 
-## Security Model
+## Key Design Decisions
 
-- **Channel-based auth:** Only messages in configured channels are processed
-- **Allowlist:** `actions.allowedCommands` glob patterns control what skips confirmation
-- **Confirmation buttons:** Non-allowlisted `send` commands show Execute/Cancel buttons
-- **Audit log:** All actions logged to `~/.orbit/audit.jsonl` with user ID, timestamp, and result
-
-## Config (`~/.orbit/config.yaml`)
-
-```yaml
-slack:
-  appToken: xapp-...
-  botToken: xoxb-...
-  channel: C0123ORBIT
-
-claude:
-  sessionDirs:
-    - /root/.claude/projects/
-
-git:
-  repos:
-    - /root/orbit
-
-actions:
-  confirmDangerous: true
-  captureDelayMs: 3000
-  allowedCommands:
-    - "y"
-    - "yes"
-    - "no"
-    - "npm *"
-    - "git *"
-
-scheduler:
-  enabled: false
-  intervalMinutes: 30
-```
-
-## Roadmap
-
-- [x] Project scaffold, config, Slack bot
-- [x] System health monitor
-- [x] Claude agent monitor with AI summaries
-- [x] Git monitor
-- [x] Scheduler and periodic reporting
-- [x] Session history tracking
-- [x] **Phase 1: tmux actions** — send/answer/capture/sessions, audit log, confirmation flow
-- [ ] Phase 2: Process management (kill, restart)
-- [ ] Phase 3: File operations (read, tail, edit)
-- [ ] Phase 4: Shell exec (run arbitrary commands with confirmation)
+- **SQLite over flat files** — Replaced `history.jsonl` and `audit.jsonl` with SQLite (WAL mode) for concurrent reads, efficient queries, and project/agent relationships
+- **Projects as first-class entities** — Projects table links to agents via path matching. Supports multiple tmux sessions, git URL tracking, auto-detection of live sessions
+- **SSE for real-time push** — Web chat uses Server-Sent Events for message delivery. All messages posted through `postMessage` are also pushed to SSE subscribers
+- **Chat persistence** — Chat messages stored in SQLite (capped at 200). Frontend loads history on mount, deduplicates with SSE stream
+- **Opt-in recording** — Watcher poll state can be recorded to `~/.orbit/recordings/` for debugging. Each recording captures parsed session state, JSONL deltas, and watcher decisions

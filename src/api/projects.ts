@@ -10,7 +10,7 @@ import {
   appendAudit,
 } from "../db.js";
 import { getClaudeSessions } from "../monitors/claude.js";
-import { getGitStatus, cloneRepo } from "../monitors/git.js";
+import { getGitStatus, cloneRepo, initRepo, createGitHubRepo } from "../monitors/git.js";
 import type { Config } from "../config.js";
 
 export function projectRoutes(config: Config): Hono {
@@ -123,6 +123,64 @@ export function projectRoutes(config: Config): Hono {
     }
   });
 
+  // Create a new project with git init and optional GitHub repo
+  app.post("/projects/init", async (c) => {
+    const body = await c.req.json<{
+      name: string;
+      path: string;
+      createGithubRepo?: boolean;
+      githubName?: string;
+      private?: boolean;
+    }>();
+    if (!body.name?.trim() || !body.path?.trim()) {
+      return c.json({ error: "Missing name or path" }, 400);
+    }
+    const projectName = body.name.trim();
+    const targetPath = body.path.trim();
+
+    // Initialize git repo
+    try {
+      await initRepo(targetPath);
+    } catch (e: any) {
+      return c.json({ error: `Init failed: ${e.message}` }, 400);
+    }
+
+    let gitUrl: string | null = null;
+
+    // Optionally create GitHub repo
+    if (body.createGithubRepo) {
+      const ghName = body.githubName?.trim() || projectName;
+      try {
+        gitUrl = await createGitHubRepo(targetPath, ghName, body.private !== false);
+      } catch (e: any) {
+        // Repo was initialized locally but GitHub creation failed — continue
+        console.error("[projects/init] GitHub repo creation failed:", e.message);
+        return c.json({ error: `GitHub repo creation failed: ${e.message}. Local repo was created at ${targetPath}.` }, 400);
+      }
+    }
+
+    try {
+      const project = createProject({
+        name: projectName,
+        path: targetPath,
+        gitUrl,
+      });
+      appendAudit({
+        timestamp: new Date().toISOString(),
+        action: "project_init",
+        target: targetPath,
+        input: JSON.stringify({ name: projectName, gitUrl }),
+        result: "ok",
+      });
+      return c.json(project, 201);
+    } catch (e: any) {
+      if (e.message?.includes("UNIQUE")) {
+        return c.json({ error: "A project with this path already exists" }, 409);
+      }
+      return c.json({ error: e.message }, 400);
+    }
+  });
+
   // Get project detail by ID
   app.get("/projects/:id", async (c) => {
     const id = parseInt(c.req.param("id"), 10);
@@ -188,12 +246,13 @@ export function projectRoutes(config: Config): Hono {
     const existing = getProjectById(id);
     if (!existing) return c.json({ error: "Not found" }, 404);
 
-    const body = await c.req.json<{ name?: string; path?: string; tmuxSessions?: string[] }>();
+    const body = await c.req.json<{ name?: string; path?: string; tmuxSessions?: string[]; gitUrl?: string }>();
     try {
       const updated = updateProject(id, {
         name: body.name?.trim(),
         path: body.path?.trim(),
         tmuxSessions: body.tmuxSessions !== undefined ? body.tmuxSessions.map((s) => s.trim()).filter(Boolean) : undefined,
+        gitUrl: body.gitUrl !== undefined ? (body.gitUrl?.trim() || null) : undefined,
       });
       appendAudit({
         timestamp: new Date().toISOString(),

@@ -463,16 +463,28 @@ export interface RecentMessage {
   timestamp: string | null;
 }
 
-/** Extract only the text blocks (no tool calls) from the last assistant message */
-export function getLastAssistantText(filePath: string): string {
+/**
+ * Extract only the text blocks (no tool calls) from the last assistant message.
+ * If `since` timestamp (ISO string or epoch ms) is provided, only considers
+ * messages after that time — used by active watch to scope to the current interaction.
+ */
+export function getLastAssistantText(filePath: string, since?: string | number): string {
   try {
     const content = readFileSync(filePath, "utf-8");
     const lines = content.trim().split("\n").filter(Boolean);
+    const sinceMs = since ? (typeof since === "number" ? since : new Date(since).getTime()) : 0;
 
     // Walk backwards to find the last assistant message
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
         const entry: JsonlMessage = JSON.parse(lines[i]);
+
+        // Stop searching if we've gone past the time boundary
+        if (sinceMs && entry.timestamp) {
+          const entryMs = new Date(entry.timestamp).getTime();
+          if (entryMs < sinceMs) break;
+        }
+
         const { role, content: msgContent } = getMessageParts(entry);
         if (role !== "assistant") continue;
         if (!Array.isArray(msgContent)) continue;
@@ -498,17 +510,26 @@ export function getLastAssistantText(filePath: string): string {
  * Walk backward through assistant messages to find the last one with substantive text.
  * Unlike getLastAssistantText, this skips over tool-call-only messages (up to `maxLookback`)
  * to find the most recent message where the agent actually communicated something.
+ * If `since` is provided, only considers messages after that time.
  * Returns the text and how many messages back it was found.
  */
-export function getLastSubstantiveText(filePath: string, maxLookback = 10): { text: string; messagesBack: number } {
+export function getLastSubstantiveText(filePath: string, maxLookback = 10, since?: string | number): { text: string; messagesBack: number } {
   try {
     const content = readFileSync(filePath, "utf-8");
     const lines = content.trim().split("\n").filter(Boolean);
+    const sinceMs = since ? (typeof since === "number" ? since : new Date(since).getTime()) : 0;
 
     let assistantsSeen = 0;
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
         const entry: JsonlMessage = JSON.parse(lines[i]);
+
+        // Stop searching if we've gone past the time boundary
+        if (sinceMs && entry.timestamp) {
+          const entryMs = new Date(entry.timestamp).getTime();
+          if (entryMs < sinceMs) break;
+        }
+
         const { role, content: msgContent } = getMessageParts(entry);
         if (role !== "assistant") continue;
         if (!Array.isArray(msgContent)) continue;
@@ -542,8 +563,9 @@ export function getLastSubstantiveText(filePath: string, maxLookback = 10): { te
  * Extract a structured work summary from the JSONL: files edited, tools used,
  * and the git diff --stat if available. This gives a concrete picture of what
  * the agent actually did, independent of the LLM summary.
+ * If `since` (epoch ms or ISO string) is provided, only considers entries after that time.
  */
-export function getWorkSummary(filePath: string, sinceLineIndex?: number): {
+export function getWorkSummary(filePath: string, since?: string | number): {
   filesEdited: string[];
   filesRead: string[];
   bashCommands: string[];
@@ -552,16 +574,23 @@ export function getWorkSummary(filePath: string, sinceLineIndex?: number): {
   try {
     const content = readFileSync(filePath, "utf-8");
     const lines = content.trim().split("\n").filter(Boolean);
-    const startIdx = sinceLineIndex ?? Math.max(0, lines.length - 200);
+    const sinceMs = since ? (typeof since === "number" ? since : new Date(since).getTime()) : 0;
 
     const filesEdited = new Set<string>();
     const filesRead = new Set<string>();
     const bashCommands: string[] = [];
     const toolCounts: Record<string, number> = {};
 
-    for (let i = startIdx; i < lines.length; i++) {
+    // Walk forward, skipping entries before the time boundary
+    for (let i = 0; i < lines.length; i++) {
       try {
         const entry: JsonlMessage = JSON.parse(lines[i]);
+
+        if (sinceMs && entry.timestamp) {
+          const entryMs = new Date(entry.timestamp).getTime();
+          if (entryMs < sinceMs) continue;
+        }
+
         const { role, content: msgContent } = getMessageParts(entry);
         if (role !== "assistant" || !Array.isArray(msgContent)) continue;
 

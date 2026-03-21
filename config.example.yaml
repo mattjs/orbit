@@ -9,9 +9,32 @@ claude:
 
 git:
   repos:
-    - /root/orbit
     - /root/my-project
 
 scheduler:
   enabled: false
   intervalMinutes: 30
+
+actions:
+  confirmDangerous: true          # Show confirm button for non-allowlisted sends
+  captureDelayMs: 3000            # Delay before capturing pane after send
+  allowedCommands:                # Patterns that skip confirmation
+    - "y"
+    - "yes"
+    - "no"
+    - "npm *"
+    - "git *"
+  watchMessageThreshold: 10       # Post periodic update after this many new messages
+  watchActiveTimeoutMs: 60000     # Max time for post-command watch (ms)
+
+web:
+  port: 443
+  auth:
+    username: admin
+    password: changeme
+  # tls:
+  #   cert: /path/to/cert.pem
+  #   key: /path/to/key.pem
+
+# anthropic:
+#   apiKey: sk-ant-...  # Or set ANTHROPIC_API_KEY env var

@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { api } from "../api";
 import { useNotifications } from "../notifications";
-import type { Message, MessagePart, ProjectSummary } from "../types";
+import { useProjectFilter } from "../agentFilter";
+import type { Message, MessagePart } from "../types";
 
 interface ChatEntry {
   id: number;
@@ -196,22 +198,16 @@ export function Chat() {
   const [loaded, setLoaded] = useState(false);
   const [focus, setFocus] = useState<FocusState>({ focused: false });
   const [answeredParts, setAnsweredParts] = useState<Map<string, string>>(new Map());
-  const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const [selectedProject, setSelectedProject] = useState<string | null>(null);
+  const { selectedProjectPath } = useProjectFilter();
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const { messages, markRead, dismissPrompt, dismissConfirm } = useNotifications();
   const lastProcessedRef = useRef(0);
 
-  // Load projects for the selector
-  useEffect(() => {
-    api.getProjects().then(setProjects).catch(() => {});
-  }, []);
-
   // Load chat history on mount and when project filter changes
   useEffect(() => {
     setLoaded(false);
-    api.getChatHistory(100, selectedProject ?? undefined).then((records) => {
+    api.getChatHistory(100, selectedProjectPath ?? undefined).then((records) => {
       const restored: ChatEntry[] = records.map((r) => ({
         id: nextId++,
         from: r.sender,
@@ -225,7 +221,7 @@ export function Chat() {
       lastProcessedRef.current = messages.length;
       setLoaded(true);
     }).catch(() => setLoaded(true));
-  }, [selectedProject]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedProjectPath]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch focus state on mount and after each send
   const refreshFocus = () => {
@@ -355,44 +351,32 @@ export function Chat() {
     send(input);
   };
 
+  const focusIndicator = focus.focused ? (
+    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs rounded-full bg-amber-900/40 border border-amber-700/40 text-amber-300">
+      <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+      <span className="hidden sm:inline">Focused:</span> {focus.tmuxSession}
+      <button
+        onClick={() => send("unfocus")}
+        className="ml-1 text-amber-400 hover:text-amber-200"
+        title="Unfocus"
+      >
+        &times;
+      </button>
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs rounded-full bg-gray-800/60 border border-gray-700/40 text-gray-400">
+      <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+      Orbit NL
+    </span>
+  );
+
+  const mobileSlot = document.getElementById("header-controls");
+  const desktopSlot = document.getElementById("header-controls-desktop");
+
   return (
-    <div className="flex flex-col h-[calc(100vh-theme(spacing.16))] md:h-[calc(100vh-theme(spacing.12))]">
-      <div className="flex items-center gap-3 mb-3 shrink-0 flex-wrap">
-        <h2 className="text-lg font-semibold">Chat</h2>
-
-        {/* Project filter */}
-        {projects.length > 0 && (
-          <select
-            value={selectedProject ?? ""}
-            onChange={(e) => setSelectedProject(e.target.value || null)}
-            className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300"
-          >
-            <option value="">All projects</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.path}>{p.name}</option>
-            ))}
-          </select>
-        )}
-
-        {focus.focused ? (
-          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs rounded-full bg-amber-900/40 border border-amber-700/40 text-amber-300">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-            Focused: {focus.tmuxSession}
-            <button
-              onClick={() => send("unfocus")}
-              className="ml-1 text-amber-400 hover:text-amber-200"
-              title="Unfocus"
-            >
-              &times;
-            </button>
-          </span>
-        ) : (
-          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs rounded-full bg-gray-800/60 border border-gray-700/40 text-gray-400">
-            <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
-            Orbit NL
-          </span>
-        )}
-      </div>
+    <div className="flex flex-col h-full">
+      {mobileSlot && createPortal(focusIndicator, mobileSlot)}
+      {desktopSlot && createPortal(focusIndicator, desktopSlot)}
 
       {/* Messages area */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden min-h-0 mb-3 px-1">

@@ -95,15 +95,59 @@ function TmuxGroupedAgents({ agents }: { agents: AgentRecord[] }) {
 }
 
 function AddProjectForm({ onCreated, discoveredPaths }: { onCreated: () => void; discoveredPaths: DiscoveredPath[] }) {
-  const [mode, setMode] = useState<null | "add" | "clone">(null);
+  const [mode, setMode] = useState<null | "clone" | "new" | "existing">(null);
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
   const [tmuxSession, setTmuxSession] = useState("");
   const [gitUrl, setGitUrl] = useState("");
+  const [createGithub, setCreateGithub] = useState(false);
+  const [isPrivate, setIsPrivate] = useState(true);
+  const [githubName, setGithubName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const reset = () => { setMode(null); setName(""); setPath(""); setTmuxSession(""); setGitUrl(""); setError(null); };
+  const reset = () => {
+    setMode(null); setName(""); setPath(""); setTmuxSession(""); setGitUrl("");
+    setCreateGithub(false); setIsPrivate(true); setGithubName(""); setError(null);
+  };
+
+  const handleClone = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!gitUrl.trim() || !path.trim()) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.cloneProject({ gitUrl: gitUrl.trim(), path: path.trim(), name: name.trim() || undefined });
+      reset();
+      onCreated();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleNew = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim() || !path.trim()) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.initProject({
+        name: name.trim(),
+        path: path.trim(),
+        createGithubRepo: createGithub,
+        githubName: githubName.trim() || undefined,
+        private: isPrivate,
+      });
+      reset();
+      onCreated();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -125,31 +169,11 @@ function AddProjectForm({ onCreated, discoveredPaths }: { onCreated: () => void;
     }
   };
 
-  const handleClone = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!gitUrl.trim() || !path.trim()) return;
-    setSubmitting(true);
-    setError(null);
-    try {
-      await api.cloneProject({
-        gitUrl: gitUrl.trim(),
-        path: path.trim(),
-        name: name.trim() || undefined,
-      });
-      reset();
-      onCreated();
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
   const adoptPath = (dp: DiscoveredPath) => {
     const basename = dp.projectPath.split("/").pop() || dp.projectPath;
     setName(basename);
     setPath(dp.projectPath);
-    setMode("add");
+    setMode("existing");
   };
 
   // Auto-derive name + path from git URL
@@ -164,15 +188,27 @@ function AddProjectForm({ onCreated, discoveredPaths }: { onCreated: () => void;
     }
   };
 
+  // Auto-derive path from name
+  const onNewNameChange = (n: string) => {
+    setName(n);
+    const slug = n.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-");
+    if (slug && (!path || path === `/root/${name.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-")}`)) {
+      setPath(`/root/${slug}`);
+    }
+  };
+
   if (!mode) {
     return (
       <div className="space-y-3">
-        <div className="flex gap-2">
-          <button onClick={() => setMode("add")} className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-500">
-            Add Project
+        <div className="flex flex-wrap gap-2">
+          <button onClick={() => setMode("clone")} className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-500">
+            Clone GitHub Repo
           </button>
-          <button onClick={() => setMode("clone")} className="px-3 py-1.5 text-sm bg-gray-700 text-gray-200 rounded hover:bg-gray-600">
-            Clone from URL
+          <button onClick={() => setMode("new")} className="px-3 py-1.5 text-sm bg-green-700 text-white rounded hover:bg-green-600">
+            Create New Project
+          </button>
+          <button onClick={() => setMode("existing")} className="px-3 py-1.5 text-sm bg-gray-700 text-gray-200 rounded hover:bg-gray-600">
+            Add Existing
           </button>
         </div>
 
@@ -199,10 +235,10 @@ function AddProjectForm({ onCreated, discoveredPaths }: { onCreated: () => void;
   if (mode === "clone") {
     return (
       <form onSubmit={handleClone} className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-3">
-        <div className="text-sm font-medium text-gray-300 mb-1">Clone Repository</div>
+        <div className="text-sm font-medium text-gray-300 mb-1">Clone GitHub Repository</div>
         <div>
-          <label className="block text-xs text-gray-500 mb-1">Git URL</label>
-          <input autoFocus value={gitUrl} onChange={(e) => onGitUrlChange(e.target.value)} placeholder="https://github.com/owner/repo.git"
+          <label className="block text-xs text-gray-500 mb-1">GitHub URL</label>
+          <input autoFocus value={gitUrl} onChange={(e) => onGitUrlChange(e.target.value)} placeholder="https://github.com/owner/repo"
             className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200 font-mono" />
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -222,6 +258,65 @@ function AddProjectForm({ onCreated, discoveredPaths }: { onCreated: () => void;
           <button type="submit" disabled={submitting || !gitUrl.trim() || !path.trim()}
             className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-500 disabled:opacity-50">
             {submitting ? "Cloning..." : "Clone & Create"}
+          </button>
+          <button type="button" onClick={reset} className="px-3 py-1.5 text-sm text-gray-400 bg-gray-800 rounded hover:bg-gray-700">Cancel</button>
+        </div>
+      </form>
+    );
+  }
+
+  if (mode === "new") {
+    return (
+      <form onSubmit={handleNew} className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-3">
+        <div className="text-sm font-medium text-gray-300 mb-1">Create New Project</div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Project Name</label>
+            <input autoFocus value={name} onChange={(e) => onNewNameChange(e.target.value)} placeholder="my-project"
+              className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Path</label>
+            <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/root/my-project"
+              className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200 font-mono" />
+          </div>
+        </div>
+
+        {/* GitHub repo option */}
+        <div className="border border-gray-800 rounded-lg p-3 space-y-2">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={createGithub} onChange={(e) => setCreateGithub(e.target.checked)}
+              className="rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500 focus:ring-offset-0" />
+            <span className="text-sm text-gray-300">Create GitHub repository</span>
+          </label>
+          {createGithub && (
+            <div className="pl-6 space-y-2">
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Repo name (optional, defaults to project name)</label>
+                <input value={githubName} onChange={(e) => setGithubName(e.target.value)} placeholder={name || "owner/repo or just repo"}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200 font-mono" />
+              </div>
+              <div className="flex gap-3">
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input type="radio" checked={isPrivate} onChange={() => setIsPrivate(true)}
+                    className="text-blue-500 focus:ring-blue-500 focus:ring-offset-0" />
+                  <span className="text-xs text-gray-400">Private</span>
+                </label>
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input type="radio" checked={!isPrivate} onChange={() => setIsPrivate(false)}
+                    className="text-blue-500 focus:ring-blue-500 focus:ring-offset-0" />
+                  <span className="text-xs text-gray-400">Public</span>
+                </label>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {error && <p className="text-sm text-red-400">{error}</p>}
+        <div className="flex gap-2">
+          <button type="submit" disabled={submitting || !name.trim() || !path.trim()}
+            className="px-3 py-1.5 text-sm bg-green-700 text-white rounded hover:bg-green-600 disabled:opacity-50">
+            {submitting ? (createGithub ? "Creating..." : "Initializing...") : (createGithub ? "Create Project & Repo" : "Create Project")}
           </button>
           <button type="button" onClick={reset} className="px-3 py-1.5 text-sm text-gray-400 bg-gray-800 rounded hover:bg-gray-700">Cancel</button>
         </div>
